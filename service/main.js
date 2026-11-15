@@ -21,7 +21,8 @@ const { createEngine } = require('../lib/engine');
 const { parseNodeUri, publicNode } = require('../lib/node-uri');
 const { createProxygateClient, normalizeSlot, slotDescriptor, syncLeases } = require('../lib/providers/proxygate');
 const { probeViaProxy } = require('../lib/probe');
-const { releasePort } = require('../lib/ports');
+const { releasePort, pool } = require('../lib/ports');
+const { syncSubscription } = require('../lib/subscriptions');
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT || process.env.EGRESS_MATRIX_PORT || 0);
 const TOKEN = String(process.env.OPENCHAMBER_SERVICE_TOKEN || '');
@@ -179,6 +180,113 @@ function fillPrimary(state) {
   state.settings.primary = first ? first.id : '';
 }
 
+function parsePort(value, label = '端口') {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw Object.assign(new Error(`${label}必须是 1-65535 的整数`), { status: 400, code: 'invalid_port' });
+  }
+  return port;
+}
+
+function portOwner(state, port, exceptKey) {
+  for (const [key, value] of Object.entries(state.ports || {})) {
+    if (key !== exceptKey && Number(value) === port) return `租约 ${key}`;
+  }
+  for (const lease of state.leases || []) {
+    if (lease.key !== exceptKey && Number(lease.port) === port) return `租约 ${lease.key}`;
+  }
+  if (Number(state.settings.defaultPort) === port) return '默认网关';
+  return '';
+}
+
+function claimPort(state, key, port) {
+  const owner = portOwner(state, port, key);
+  if (owner) {
+    throw Object.assign(new Error(`端口 ${port} 已被${owner}占用`), { status: 409, code: 'port_taken' });
+  }
+  state.ports = state.ports || {};
+  state.ports[key] = port;
+  return port;
+}
+
+function slug(text) {
+  const cleaned = String(text || '').toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return cleaned || 'node';
+}
+
+function leaseKeyFor(state, prefix, node) {
+  const base = `${prefix}/${slug(node.name)}`;
+  const taken = new Set((state.leases || []).map((lease) => lease.key));
+  if (!taken.has(base)) return base;
+  let index = 2;
+  while (taken.has(`${base}-${index}`)) index += 1;
+  return `${base}-${index}`;
+}
+
+function autoLeaseNodes(state, subscription, options = {}) {
+  const prefix = String(options.keyPrefix || subscription.keyPrefix || `sub/${slug(subscription.name)}`).replace(/\/+$/, '');
+  const startPort = options.startPort === undefined ? 0 : parsePort(options.startPort, '起始端口');
+  const country = String(options.country || '').trim().toUpperCase();
+  let created = 0;
+  let nextPort = startPort;
+
+  for (const node of state.nodes || []) {
+    if (node.subscriptionId !== subscription.id) continue;
+    if ((state.leases || []).some((lease) => lease.nodeId === node.id)) continue;
+    const key = leaseKeyFor(state, prefix, node);
+    const lease = {
+      id: store.newId('lease'),
+      key,
+      provider: 'static',
+      nodeId: node.id,
+      country,
+      port: 0,
+      ok: null,
+      createdAt: new Date().toISOString(),
+    };
+    if (nextPort) {
+      claimPort(state, key, nextPort);
+      lease.port = nextPort;
+      nextPort += 1;
+    }
+    state.leases.push(lease);
+    created += 1;
+  }
+  return created;
+}
+
+function subscriptionView(state, subscription) {
+  return {
+    id: subscription.id,
+    name: subscription.name,
+    url: subscription.url,
+    keyPrefix: subscription.keyPrefix || '',
+    autoLease: Boolean(subscription.autoLease),
+    nodeCount: (state.nodes || []).filter((node) => node.subscriptionId === subscription.id).length,
+    leaseCount: (state.leases || []).filter((lease) => {
+      const node = store.findNode(state, lease.nodeId);
+      return node && node.subscriptionId === subscription.id;
+    }).length,
+    lastSyncAt: subscription.lastSyncAt || '',
+    lastError: subscription.lastError || '',
+    createdAt: subscription.createdAt || '',
+  };
+}
+
+async function applySubscription(state, subscription) {
+  const result = await syncSubscription(state, subscription, {});
+  if (subscription.autoLease) {
+    result.createdLeases = autoLeaseNodes(state, subscription);
+  }
+  fillPrimary(state);
+  store.save(state);
+  await engine.reconcile('subscription-sync');
+  return result;
+}
+
 function configView(state) {
   return {
     ok: true,
@@ -187,8 +295,16 @@ function configView(state) {
     nodes: (state.nodes || []).map((node) => {
       let view = null;
       try { view = publicNode(parseNodeUri(node.uri)); } catch (error) { view = { error: error.message }; }
-      return { id: node.id, name: node.name, createdAt: node.createdAt, lastCheck: node.lastCheck || null, node: view };
+      return {
+        id: node.id,
+        name: node.name,
+        subscriptionId: node.subscriptionId || '',
+        createdAt: node.createdAt,
+        lastCheck: node.lastCheck || null,
+        node: view,
+      };
     }),
+    subscriptions: (state.subscriptions || []).map((subscription) => subscriptionView(state, subscription)),
     proxygate: maskProxygate(state.proxygate),
     leases: (state.leases || []).map((lease) => ({
       id: lease.id,
@@ -200,6 +316,7 @@ function configView(state) {
       port: lease.port || 0,
       ok: lease.ok,
       exitIp: lease.exitIp || '',
+      exitIpCheckedAt: lease.exitIpCheckedAt || '',
       checkError: lease.checkError || '',
       createdAt: lease.createdAt || '',
     })),
@@ -358,7 +475,7 @@ function nodeFromBody(body) {
   return { uri, name, descriptor };
 }
 
-function listRoutes(req, res, url, body) {
+async function listRoutes(req, res, url, body) {
   const parts = url.pathname.split('/').filter(Boolean);
   const id = parts[2] ? decodeURIComponent(parts[2]) : '';
 
@@ -443,8 +560,137 @@ function listRoutes(req, res, url, body) {
     }
   }
 
+  if (url.pathname === '/api/subscriptions' && req.method === 'GET') {
+    const state = store.load();
+    return send(res, 200, { ok: true, subscriptions: (state.subscriptions || []).map((sub) => subscriptionView(state, sub)) });
+  }
+
+  if (url.pathname === '/api/subscriptions' && req.method === 'POST') {
+    const state = store.load();
+    const urlText = String(body.url || '').trim();
+    if (!/^https?:\/\//i.test(urlText)) {
+      throw Object.assign(new Error('订阅地址必须是 http(s) URL'), { status: 400, code: 'invalid_subscription_url' });
+    }
+    if ((state.subscriptions || []).some((sub) => sub.url === urlText)) {
+      throw Object.assign(new Error('这个订阅已经添加过了'), { status: 409, code: 'subscription_exists' });
+    }
+    state.subscriptions = state.subscriptions || [];
+    const subscription = {
+      id: store.newId('sub'),
+      name: String(body.name || '').trim() || `订阅 ${state.subscriptions.length + 1}`,
+      url: urlText,
+      keyPrefix: String(body.keyPrefix || '').trim().replace(/\/+$/, ''),
+      autoLease: Boolean(body.autoLease),
+      lastSyncAt: '',
+      lastError: '',
+      createdAt: new Date().toISOString(),
+    };
+    state.subscriptions.push(subscription);
+    store.save(state);
+    let synced = true;
+    let result = {};
+    try {
+      result = await applySubscription(state, subscription);
+    } catch (error) {
+      synced = false;
+      const failed = store.load();
+      const fresh = (failed.subscriptions || []).find((sub) => sub.id === subscription.id);
+      if (fresh) {
+        fresh.lastError = error.message;
+        store.save(failed);
+      }
+      result = { error: error.message, code: error.code || 'subscription_sync_failed' };
+    }
+    return send(res, 201, { ok: true, synced, subscription: subscriptionView(store.load(), subscription), result, config: configView(store.load()) });
+  }
+
+  if (parts[0] === 'api' && parts[1] === 'subscriptions' && id) {
+    const state = store.load();
+    const subscription = (state.subscriptions || []).find((sub) => sub.id === id);
+    if (!subscription) throw Object.assign(new Error('订阅不存在'), { status: 404, code: 'subscription_missing' });
+
+    if (req.method === 'PATCH') {
+      if (body.name !== undefined) subscription.name = String(body.name || '').trim() || subscription.name;
+      if (body.url !== undefined) {
+        const urlText = String(body.url || '').trim();
+        if (!/^https?:\/\//i.test(urlText)) {
+          throw Object.assign(new Error('订阅地址必须是 http(s) URL'), { status: 400, code: 'invalid_subscription_url' });
+        }
+        subscription.url = urlText;
+      }
+      if (body.keyPrefix !== undefined) subscription.keyPrefix = String(body.keyPrefix || '').trim().replace(/\/+$/, '');
+      if (body.autoLease !== undefined) subscription.autoLease = Boolean(body.autoLease);
+      store.save(state);
+      return send(res, 200, { ok: true, subscription: subscriptionView(store.load(), subscription), config: configView(store.load()) });
+    }
+
+    if (req.method === 'DELETE') {
+      const nodeIds = new Set((state.nodes || []).filter((node) => node.subscriptionId === id).map((node) => node.id));
+      const used = (state.leases || []).filter((lease) => nodeIds.has(lease.nodeId));
+      for (const lease of used) releasePort(state, lease.key);
+      state.leases = (state.leases || []).filter((lease) => !nodeIds.has(lease.nodeId));
+      state.nodes = (state.nodes || []).filter((node) => !nodeIds.has(node.id));
+      state.subscriptions = (state.subscriptions || []).filter((sub) => sub.id !== id);
+      fillPrimary(state);
+      store.save(state);
+      return engine.reconcile('subscription-delete').then(() => send(res, 200, {
+        ok: true,
+        removedNodes: nodeIds.size,
+        removedLeases: used.length,
+      }));
+    }
+
+    if (parts[3] === 'sync' && req.method === 'POST') {
+      try {
+        const result = await applySubscription(state, subscription);
+        return send(res, 200, { ok: true, result, config: configView(store.load()) });
+      } catch (error) {
+        const failed = store.load();
+        const fresh = (failed.subscriptions || []).find((sub) => sub.id === id);
+        if (fresh) {
+          fresh.lastError = error.message;
+          store.save(failed);
+        }
+        throw error;
+      }
+    }
+
+    if (parts[3] === 'leases' && req.method === 'POST') {
+      const created = autoLeaseNodes(state, subscription, {
+        keyPrefix: body.keyPrefix,
+        startPort: body.startPort,
+        country: body.country,
+      });
+      fillPrimary(state);
+      store.save(state);
+      return engine.reconcile('subscription-leases').then(() => send(res, 201, {
+        ok: true,
+        created,
+        config: configView(store.load()),
+      }));
+    }
+  }
+
   if (url.pathname === '/api/leases' && req.method === 'GET') {
     return send(res, 200, { ok: true, leases: store.load().leases || [], primary: store.load().settings.primary });
+  }
+
+  if (url.pathname === '/api/leases/batch' && req.method === 'POST') {
+    const state = store.load();
+    const subscription = (state.subscriptions || []).find((sub) => sub.id === String(body.subscriptionId || ''));
+    if (!subscription) throw Object.assign(new Error('先选择一个订阅'), { status: 400, code: 'subscription_missing' });
+    const created = autoLeaseNodes(state, subscription, {
+      keyPrefix: body.keyPrefix,
+      startPort: body.startPort,
+      country: body.country,
+    });
+    fillPrimary(state);
+    store.save(state);
+    return engine.reconcile('leases-batch').then(() => send(res, 201, {
+      ok: true,
+      created,
+      config: configView(store.load()),
+    }));
   }
 
   if (url.pathname === '/api/leases' && req.method === 'POST') {
@@ -469,6 +715,9 @@ function listRoutes(req, res, url, body) {
       ok: null,
       createdAt: new Date().toISOString(),
     };
+    if (body.port !== undefined && body.port !== '' && body.port !== null) {
+      lease.port = claimPort(state, key, parsePort(body.port));
+    }
     state.leases.push(lease);
     if (body.primary || state.leases.length === 1) state.settings.primary = lease.id;
     fillPrimary(state);
@@ -484,7 +733,28 @@ function listRoutes(req, res, url, body) {
     if (req.method === 'PATCH') {
       if (body.key !== undefined) {
         const key = String(body.key || '').trim();
-        if (key) lease.key = key;
+        if (key && key !== lease.key) {
+          if ((state.leases || []).some((entry) => entry.key === key)) {
+            throw Object.assign(new Error('租约 key 重复'), { status: 409, code: 'lease_key_exists' });
+          }
+          const oldKey = lease.key;
+          const carried = Number(state.ports && state.ports[oldKey]);
+          if (Number.isInteger(carried) && carried > 0) {
+            delete state.ports[oldKey];
+            const owner = portOwner(state, carried, key);
+            if (owner) {
+              state.ports[oldKey] = carried;
+              throw Object.assign(new Error(`端口 ${carried} 已被${owner}占用`), { status: 409, code: 'port_taken' });
+            }
+            state.ports[key] = carried;
+          }
+          lease.key = key;
+        }
+      }
+      if (body.port !== undefined && body.port !== '' && body.port !== null) {
+        const port = parsePort(body.port);
+        claimPort(state, lease.key, port);
+        lease.port = port;
       }
       if (body.country !== undefined) lease.country = String(body.country || '').trim().toUpperCase();
       if (body.primary) state.settings.primary = lease.id;

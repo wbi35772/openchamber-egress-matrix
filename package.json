@@ -1,11 +1,11 @@
 {
   "name": "openchamber-egress-matrix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Independent local egress plane for OpenChamber: static proxy nodes and proxygate slots as stable mixed ports any local app can use.",
+  "description": "Independent local egress plane for OpenChamber: manual nodes, subscriptions and proxygate slots as stable mixed ports any local app can use.",
   "license": "MIT",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --test-force-exit",
     "service": "node service/main.js"
   },
   "openchamber": {
