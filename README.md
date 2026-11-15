@@ -4,6 +4,9 @@ OpenChamber 的独立本机出口层。装入扩展、点开面板，就能拿�
 
 不依赖 sing-box、不需要下载 JSON 包、不需要手工改端口表。扩展自己监听、自己探测、自己写共享契约。
 
+- 私有仓库：<https://github.com/wbi35772/openchamber-egress-matrix>
+- 架构与运维文档：[docs/architecture.html](docs/architecture.html)（单文件，浏览器直接打开，无构建）
+
 ## 它解决什么
 
 - **给本机软件用**：浏览器、curl、Postman、其他代理客户端，直接连 `http://127.0.0.1:25001` 或 `socks5://127.0.0.1:25001`。

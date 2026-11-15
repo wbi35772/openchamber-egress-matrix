@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Egress Matrix · 架构与功能文档</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-soft: #0e141b;
+    --panel: #111923;
+    --panel-2: #0f1720;
+    --line: #1e2b38;
+    --line-soft: #17222d;
+    --text: #e6edf3;
+    --muted: #8b9bb0;
+    --dim: #5c6c7f;
+    --green: #3ddc97;
+    --green-dim: rgba(61, 220, 151, 0.12);
+    --cyan: #59c2ff;
+    --cyan-dim: rgba(89, 194, 255, 0.12);
+    --amber: #f4c95d;
+    --amber-dim: rgba(244, 201, 93, 0.12);
+    --red: #ff6b6b;
+    --violet: #b794f6;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1100px 500px at 75% -10%, rgba(61, 220, 151, 0.09), transparent 60%),
+      radial-gradient(900px 420px at 10% 0%, rgba(89, 194, 255, 0.07), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, .mono { font-family: var(--mono); }
+  code { font-size: 12.5px; color: #b9f4d8; background: rgba(61, 220, 151, 0.08); padding: 1px 5px; border-radius: 5px; }
+  pre {
+    margin: 0;
+    padding: 15px 16px;
+    background: #0a1017;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    overflow: auto;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: #cfe6dc;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  h1, h2, h3, h4 { margin: 0; font-weight: 680; letter-spacing: -0.01em; }
+  h2 { font-size: 24px; }
+  h3 { font-size: 16px; }
+  p { margin: 0; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 4px 0; }
+  ::selection { background: rgba(61, 220, 151, 0.28); }
+
+  /* icons */
+  .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .ic { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .ic.lg { width: 22px; height: 22px; }
+
+  /* hero */
+  .hero {
+    position: relative;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .hero::after {
+    content: "";
+    position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,0.65), transparent 85%);
+    pointer-events: none;
+  }
+  .hero-inner {
+    position: relative; z-index: 1;
+    max-width: 1280px; margin: 0 auto;
+    padding: 54px 30px 44px;
+    display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+    gap: 36px; align-items: center;
+  }
+  .eyebrow { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.18em; color: var(--green); text-transform: uppercase; }
+  .hero h1 { font-size: 46px; line-height: 1.05; margin: 10px 0 14px; letter-spacing: -0.035em; }
+  .hero h1 span { color: var(--green); }
+  .lede { color: var(--muted); font-size: 15px; max-width: 620px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 22px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 999px; padding: 4px 10px;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+  .badge.green { border-color: rgba(61,220,151,0.35); background: var(--green-dim); color: var(--green); }
+  .badge.cyan { border-color: rgba(89,194,255,0.35); background: var(--cyan-dim); color: var(--cyan); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--line); background: var(--panel);
+    color: var(--text); border-radius: 10px; padding: 9px 14px;
+    font-size: 13px; font-weight: 600; cursor: pointer; text-decoration: none;
+  }
+  .btn:hover { border-color: #2c4054; text-decoration: none; }
+  .btn.primary { background: var(--green); border-color: var(--green); color: #04180f; }
+  .btn.primary:hover { filter: brightness(1.06); }
+
+  .hero-panel {
+    border: 1px solid var(--line); border-radius: 18px;
+    background: linear-gradient(180deg, rgba(17,25,35,0.95), rgba(11,16,23,0.95));
+    padding: 18px; box-shadow: 0 24px 70px rgba(0,0,0,0.35);
+  }
+  .hp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .hp-title { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; }
+  .lane-card {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+    border: 1px solid var(--line-soft); border-radius: 11px; background: var(--panel-2);
+    padding: 11px 13px; margin-top: 8px;
+  }
+  .lane-card.default { border-color: rgba(61,220,151,0.42); background: linear-gradient(90deg, rgba(61,220,151,0.1), var(--panel-2) 55%); }
+  .lane-key { font-family: var(--mono); font-size: 12px; }
+  .lane-key small { display: block; color: var(--dim); font-size: 10.5px; font-family: var(--sans); }
+  .lane-port { font-family: var(--mono); font-size: 13px; color: var(--green); align-self: center; }
+  .lane-meta { grid-column: 1 / -1; color: var(--dim); font-size: 11px; font-family: var(--mono); }
+  .hp-foot { margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--line); color: var(--dim); font-size: 11.5px; display: flex; justify-content: space-between; }
+
+  /* shell */
+  .shell { max-width: 1280px; margin: 0 auto; display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 38px; padding: 34px 30px 80px; }
+  .side { position: sticky; top: 22px; align-self: start; max-height: calc(100vh - 44px); overflow: auto; padding-right: 4px; }
+  .side::-webkit-scrollbar { width: 6px; }
+  .side::-webkit-scrollbar-thumb { background: #24323f; border-radius: 3px; }
+  .side-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; padding: 0 6px; }
+  .side-mark { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--green-dim); color: var(--green); border: 1px solid rgba(61,220,151,0.3); }
+  .side-brand strong { font-size: 13px; letter-spacing: 0.08em; }
+  .side-brand small { display: block; color: var(--dim); font-size: 10px; letter-spacing: 0.12em; }
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav a {
+    display: flex; align-items: center; gap: 9px;
+    color: var(--muted); padding: 7px 10px; border-radius: 8px;
+    font-size: 12.5px; border: 1px solid transparent;
+  }
+  .nav a:hover { color: var(--text); background: rgba(255,255,255,0.03); text-decoration: none; }
+  .nav a.active { color: var(--green); background: var(--green-dim); border-color: rgba(61,220,151,0.2); }
+  .nav a .ic { width: 15px; height: 15px; }
+  .side-meta { margin-top: 20px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); padding: 12px; font-size: 11px; color: var(--dim); }
+  .side-meta div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  .side-meta b { color: var(--muted); font-weight: 500; font-family: var(--mono); }
+
+  /* sections */
+  main { min-width: 0; }
+  section.doc { padding: 4px 0 46px; border-bottom: 1px solid var(--line-soft); margin-bottom: 42px; }
+  section.doc:last-child { border-bottom: 0; margin-bottom: 0; }
+  .sec-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+  .sec-icon { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: var(--panel); border: 1px solid var(--line); color: var(--green); flex: none; }
+  .sec-head .kicker { font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; color: var(--dim); text-transform: uppercase; }
+  .sec-head p { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .grid { display: grid; gap: 14px; }
+  .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 16px; min-width: 0; }
+  .card h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .card h3 .ic { color: var(--green); }
+  .card p, .card li { color: var(--muted); font-size: 12.5px; }
+  .card .row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px dashed var(--line-soft); font-size: 12px; }
+  .card .row:last-child { border-bottom: 0; }
+  .card .row span:first-child { color: var(--dim); }
+  .card .row span:last-child { font-family: var(--mono); color: var(--text); text-align: right; }
+  .tag { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; padding: 2px 7px; font-size: 10.5px; font-family: var(--mono); border: 1px solid var(--line); color: var(--muted); }
+  .tag.ok { color: var(--green); border-color: rgba(61,220,151,0.35); background: var(--green-dim); }
+  .tag.warn { color: var(--amber); border-color: rgba(244,201,93,0.35); background: var(--amber-dim); }
+  .tag.todo { color: var(--dim); }
+  .tag.info { color: var(--cyan); border-color: rgba(89,194,255,0.35); background: var(--cyan-dim); }
+  .callout { border: 1px solid rgba(61,220,151,0.28); background: var(--green-dim); border-radius: 11px; padding: 11px 13px; font-size: 12.5px; color: #bdf5da; display: flex; gap: 9px; }
+  .callout.warn { border-color: rgba(244,201,93,0.3); background: var(--amber-dim); color: #f6e2ad; }
+  .callout .ic { margin-top: 2px; }
+
+  /* diagrams */
+  .diagram { border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(180deg, #0e151d, #0a1017); padding: 10px; overflow-x: auto; }
+  .diagram svg { display: block; min-width: 900px; width: 100%; height: auto; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px 4px 0; font-size: 11px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 8px; border-radius: 2px; }
+  .sw-green { background: var(--green); }
+  .sw-cyan { background: var(--cyan); }
+  .sw-amber { background: var(--amber); }
+  .sw-violet { background: var(--violet); }
+
+  /* steps */
+  .steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; counter-reset: step; }
+  .step { position: relative; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); padding: 13px 12px; }
+  .step::before { counter-increment: step; content: "0" counter(step); font-family: var(--mono); font-size: 10px; color: var(--green); letter-spacing: 0.1em; }
+  .step h4 { font-size: 12.5px; margin: 5px 0 3px; }
+  .step p { color: var(--dim); font-size: 11px; line-height: 1.5; }
+
+  /* tabs cards */
+  .tabcard { position: relative; overflow: hidden; }
+  .tabcard::after { content: ""; position: absolute; right: -30px; top: -30px; width: 90px; height: 90px; border-radius: 50%; background: radial-gradient(circle, rgba(61,220,151,0.12), transparent 70%); }
+  .tabcard .num { font-family: var(--mono); font-size: 10px; color: var(--dim); letter-spacing: 0.1em; }
+  .tabcard ul { margin-top: 8px; }
+
+  /* table */
+  .table-wrap { border: 1px solid var(--line); border-radius: 11px; overflow: auto; background: var(--panel); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 720px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); background: var(--panel-2); padding: 9px 12px; border-bottom: 1px solid var(--line); font-weight: 600; position: sticky; top: 0; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); color: var(--muted); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+  .method { font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; }
+  .m-get { color: var(--cyan); }
+  .m-post { color: var(--green); }
+  .m-put { color: var(--amber); }
+  .m-patch { color: var(--violet); }
+  .m-del { color: var(--red); }
+  .filter { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .filter input { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; color: var(--text); font-family: var(--mono); font-size: 12px; outline: none; }
+  .filter input:focus { border-color: rgba(61,220,151,0.5); }
+
+  /* code block with copy */
+  .codebox { position: relative; }
+  .codebox .copy { position: absolute; top: 8px; right: 8px; border: 1px solid var(--line); background: #0d141c; color: var(--muted); border-radius: 6px; padding: 3px 8px; font-size: 10.5px; cursor: pointer; font-family: var(--mono); }
+  .codebox .copy:hover { color: var(--green); border-color: rgba(61,220,151,0.4); }
+
+  /* file tree */
+  .tree { font-family: var(--mono); font-size: 12px; line-height: 1.85; color: var(--muted); }
+  .tree .dir { color: var(--cyan); }
+  .tree .file { color: var(--text); }
+  .tree .note { color: var(--dim); font-family: var(--sans); font-size: 11px; }
+
+  /* roadmap */
+  .road { position: relative; padding-left: 20px; }
+  .road::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 1px; background: var(--line); }
+  .road-item { position: relative; padding: 0 0 18px 4px; }
+  .road-item::before { content: ""; position: absolute; left: -19px; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--bg); border: 2px solid var(--green); }
+  .road-item.p1::before { border-color: var(--cyan); }
+  .road-item.p2::before { border-color: var(--dim); }
+  .road-item h4 { font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .road-item p { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  footer { border-top: 1px solid var(--line); padding: 24px 30px 40px; text-align: center; color: var(--dim); font-size: 11.5px; }
+  footer .mono { color: var(--muted); }
+
+  @media (max-width: 1000px) {
+    .hero-inner { grid-template-columns: 1fr; padding: 40px 22px 34px; }
+    .hero h1 { font-size: 38px; }
+    .shell { grid-template-columns: 1fr; padding: 24px 22px 60px; }
+    .side { position: static; max-height: none; }
+    .side .nav { flex-direction: row; flex-wrap: wrap; }
+    .side-meta, .side-brand { display: none; }
+    .g3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 620px) {
+    .g2, .g3 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 32px; }
+    .steps { grid-template-columns: 1fr; }
+    section.doc { padding-bottom: 32px; margin-bottom: 30px; }
+  }
+  @media print {
+    body { background: #fff; color: #111; }
+    .side, .hero-actions, .filter, .copy { display: none !important; }
+    .shell { display: block; max-width: none; }
+    .card, .diagram, pre, .table-wrap { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-gateway" viewBox="0 0 24 24"><path d="M3 12h11"/><path d="m11 8 4 4-4 4"/><path d="M19 4v16"/><path d="M16 8h6M16 16h6"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v6"/><path d="M5 8v6a4 4 0 0 0 4 4h8"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 16 9 5 9-5"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M6 8h12v4a6 6 0 0 1-12 0V8Z"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 4 3-4 3M13 15h4"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></symbol>
+  <symbol id="i-roadmap" viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M4 19h16"/><path d="m7 15 4-4 3 3 5-6"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h4M11 17.5h4"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 9-9M15 8l3 3M18 5l2 2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5M12 18h.01"/></symbol>
+  <symbol id="i-flow" viewBox="0 0 24 24"><rect x="2" y="3" width="6" height="6" rx="1"/><rect x="16" y="15" width="6" height="6" rx="1"/><path d="M8 6h5a3 3 0 0 1 3 3v6"/><path d="m13 12 3 3 3-3"/></symbol>
+  <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 9v6M18 9v3a6 6 0 0 1-6 6H9"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+</svg>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div>
+      <div class="eyebrow">OpenChamber Extension · Egress Plane</div>
+      <h1>Egress <span>Matrix</span></h1>
+      <p class="lede">把一个租约变成一条固定本地端口、一条独立上游线路。HTTP CONNECT 与 SOCKS5 同端口，任何本机软件直接填 <code>127.0.0.1:PORT</code>；其他扩展只读稳定契约，取不到就失败，绝不偷偷直连。</p>
+      <div class="badges">
+        <span class="badge green"><span class="dot"></span>v0.2.0</span>
+        <span class="badge"><b>21</b> tests</span>
+        <span class="badge"><b>0</b> runtime deps</span>
+        <span class="badge cyan">private repo</span>
+        <span class="badge"><b>6</b> panel tabs</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn primary" href="https://github.com/wbi35772/openchamber-egress-matrix" target="_blank" rel="noreferrer"><svg class="ic"><use href="#i-git"/></svg>GitHub 私有仓库</a>
+        <button class="btn" data-copy="C:\Users\24999\.config\openchamber\extensions\egress-matrix"><svg class="ic"><use href="#i-copy"/></svg>复制安装路径</button>
+      </div>
+    </div>
+    <div class="hero-panel" aria-label="端口模型示意">
+      <div class="hp-head">
+        <span class="hp-title">Local Endpoints</span>
+        <span class="tag ok"><span class="dot"></span>live</span>
+      </div>
+      <div class="lane-card default">
+        <div class="lane-key">default <small>primary 跟随别名</small></div>
+        <div class="lane-port">:25001</div>
+        <div class="lane-meta">http://127.0.0.1:25001 · socks5://127.0.0.1:25001</div>
+      </div>
+      <div class="lane-card">
+        <div class="lane-key">ibk/wbi35772 <small>账号 A · 静态节点</small></div>
+        <div class="lane-port">:25101</div>
+        <div class="lane-meta">exit 35.91.188.19 · ok=true</div>
+      </div>
+      <div class="lane-card">
+        <div class="lane-key">ibk/sub-jp <small>订阅节点 · 待建</small></div>
+        <div class="lane-port">:25220</div>
+        <div class="lane-meta">端口显式钉住 · 重启不变</div>
+      </div>
+      <div class="hp-foot"><span>endpoints.json</span><span>byKey → port</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="side">
+    <div class="side-brand">
+      <span class="side-mark"><svg class="ic"><use href="#i-gateway"/></svg></span>
+      <div><strong>EGRESS</strong><small>MATRIX DOCS</small></div>
+    </div>
+    <nav class="nav" id="nav">
+      <a href="#overview"><svg class="ic"><use href="#i-book"/></svg>总览与能力</a>
+      <a href="#architecture"><svg class="ic"><use href="#i-layers"/></svg>架构图</a>
+      <a href="#ports"><svg class="ic"><use href="#i-route"/></svg>端口与租约</a>
+      <a href="#ingress"><svg class="ic"><use href="#i-plug"/></svg>三种接入</a>
+      <a href="#panel"><svg class="ic"><use href="#i-server"/></svg>面板六标签</a>
+      <a href="#contract"><svg class="ic"><use href="#i-file"/></svg>数据契约</a>
+      <a href="#api"><svg class="ic"><use href="#i-terminal"/></svg>本地 API</a>
+      <a href="#runbook"><svg class="ic"><use href="#i-shield"/></svg>运行手册</a>
+      <a href="#files"><svg class="ic"><use href="#i-git"/></svg>代码地图</a>
+      <a href="#limits"><svg class="ic"><use href="#i-alert"/></svg>边界与排障</a>
+      <a href="#roadmap"><svg class="ic"><use href="#i-roadmap"/></svg>迭代路线</a>
+      <a href="#changelog"><svg class="ic"><use href="#i-check"/></svg>变更记录</a>
+    </nav>
+    <div class="side-meta">
+      <div><span>版本</span><b>0.2.0</b></div>
+      <div><span>Node</span><b>≥ 24</b></div>
+      <div><span>OpenChamber</span><b>≥ 2.5</b></div>
+      <div><span>监听</span><b>127.0.0.1</b></div>
+      <div><span>默认口</span><b>25001</b></div>
+      <div><span>池起点</span><b>25101</b></div>
+    </div>
+  </aside>
+
+  <main>
+    <section class="doc" id="overview">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-book"/></svg></span>
+        <div><div class="kicker">01 · Overview</div><h2>总览与能力</h2><p>独立扩展，不依赖 sing-box，不维护外部 JSON 包或端口转换文件。</p></div>
+      </div>
+      <div class="grid g3">
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-gateway"/></svg>一个租约一个端口</h3>
+          <p>租约 key 与本地端口一一对应，端口持久化在 <code>state.ports</code>。重启、重协调、增删其他租约都不改变已钉住的端口。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-shield"/></svg>Fail-closed</h3>
+          <p>消费方按 <code>byKey[key]</code> 取端口；key 不存在、线路未起、探测失败都直接失败。没有“回退直连”这个分支。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-layers"/></svg>混合代理同端口</h3>
+          <p>同一个监听同时识别 SOCKS5 握手、HTTP CONNECT 与 absolute-form 请求。浏览器、curl、扩展都只填一个地址。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-plug"/></svg>三种上游来源</h3>
+          <p>手动节点 URI、整池订阅、proxygate 槽位。来源只影响“这条线路指向哪”，不影响租约端口与契约结构。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-check"/></svg>端到端探测</h3>
+          <p>探测不是问进程“你活着吗”，而是通过真实本地端口访问 <code>probeUrl</code>，把出口 IP 写回租约与契约文件。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-terminal"/></svg>零运行时依赖</h3>
+          <p>只用 <code>node:net</code>、<code>node:http</code>、<code>node:tls</code>、<code>node:crypto</code>。没有 npm 安装步骤，装进扩展目录即运行。</p>
+        </div>
+      </div>
+      <div class="callout" style="margin-top:14px">
+        <svg class="ic"><use href="#i-flow"/></svg>
+        <div><b>数据流一句话：</b>本地软件 → 混合监听（25001 / 251xx）→ 引擎按租约选择上游 → VLESS / Trojan over WS+TLS、SOCKS5 或 proxygate 槽位 → 目标站点。出口 IP 回写到 <code>endpoints.json</code>。</div>
+      </div>
+    </section>
+
+    <section class="doc" id="architecture">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-layers"/></svg></span>
+        <div><div class="kicker">02 · Architecture</div><h2>架构图</h2><p>四层：消费者、扩展服务、上游适配、互联网出口。</p></div>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 1080 420" role="img" aria-label="Egress Matrix 架构图">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 10 5 0 10z" fill="#3ddc97"/>
+            </marker>
+            <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 10 5 0 10z" fill="#59c2ff"/>
+            </marker>
+            <linearGradient id="svc" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#3ddc97" stop-opacity="0.13"/>
+              <stop offset="1" stop-color="#3ddc97" stop-opacity="0.03"/>
+            </linearGradient>
+          </defs>
+          <style>
+            .bx { fill: #0f1720; stroke: #243346; stroke-width: 1; rx: 9; }
+            .bx-svc { fill: url(#svc); stroke: #3ddc97; stroke-width: 1.3; rx: 11; }
+            .bx-up { fill: #0f1720; stroke: #59c2ff; stroke-width: 1; rx: 9; }
+            .t { fill: #e6edf3; font: 600 12.5px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+            .s { fill: #8b9bb0; font: 11px ui-monospace, Consolas, monospace; }
+            .k { fill: #5c6c7f; font: 10px ui-monospace, Consolas, monospace; letter-spacing: 1.5px; }
+            .ln { stroke: #3ddc97; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+            .lnc { stroke: #59c2ff; stroke-width: 1.4; fill: none; marker-end: url(#arrow-cyan); stroke-dasharray: 4 4; }
+            .dash { stroke: #26374a; stroke-width: 1; stroke-dasharray: 3 5; }
+          </style>
+
+          <text x="26" y="30" class="k">CONSUMERS</text>
+          <text x="300" y="30" class="k">EGRESS MATRIX · HOST SERVICE</text>
+          <text x="700" y="30" class="k">UPSTREAM ADAPTERS</text>
+          <text x="946" y="30" class="k">INTERNET</text>
+
+          <rect x="26" y="48" width="214" height="86" class="bx"/>
+          <text x="42" y="76" class="t">浏览器 / curl / 本机软件</text>
+          <text x="42" y="97" class="s">http://127.0.0.1:25001</text>
+          <text x="42" y="115" class="s">socks5://127.0.0.1:25001</text>
+
+          <rect x="26" y="152" width="214" height="86" class="bx"/>
+          <text x="42" y="180" class="t">其他 OpenChamber 扩展</text>
+          <text x="42" y="201" class="s">endpoints.json</text>
+          <text x="42" y="219" class="s">byKey[key].port</text>
+
+          <rect x="26" y="256" width="214" height="86" class="bx"/>
+          <text x="42" y="284" class="t">Instabox 自动化 / 脚本</text>
+          <text x="42" y="305" class="s">每账号固定 lane</text>
+          <text x="42" y="323" class="s">取不到即失败</text>
+
+          <rect x="300" y="44" width="330" height="304" class="bx-svc"/>
+          <text x="320" y="72" class="t">service/main.js · 本地 HTTP API</text>
+          <text x="320" y="93" class="s">Bearer token · configView · 路由校验</text>
+
+          <rect x="320" y="110" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
+          <text x="336" y="135" class="t">混合监听池</text>
+          <text x="336" y="155" class="s">default 25001 · leases 25101+</text>
+
+          <rect x="320" y="184" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
+          <text x="336" y="209" class="t">engine.js · reconcile / probe</text>
+          <text x="336" y="229" class="s">签名 diff · EADDRINUSE 重排 · 端到端</text>
+
+          <rect x="320" y="258" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
+          <text x="336" y="283" class="t">store.js · 原子写入</text>
+          <text x="336" y="303" class="s">state.json · endpoints.json · proxies.txt</text>
+
+          <rect x="700" y="52" width="230" height="80" class="bx-up"/>
+          <text x="716" y="80" class="t">VLESS over WS + TLS</text>
+          <text x="716" y="100" class="s">path / sni / host</text>
+          <text x="716" y="118" class="s">node-uri.js 白名单</text>
+
+          <rect x="700" y="148" width="230" height="80" class="bx-up"/>
+          <text x="716" y="176" class="t">Trojan over WS + TLS</text>
+          <text x="716" y="196" class="s">password / path</text>
+          <text x="716" y="214" class="s">同一字节管道</text>
+
+          <rect x="700" y="244" width="230" height="80" class="bx-up"/>
+          <text x="716" y="272" class="t">SOCKS5 / proxygate 槽位</text>
+          <text x="716" y="292" class="s">username / password</text>
+          <text x="716" y="310" class="s">slot → lease 同步</text>
+
+          <rect x="962" y="120" width="92" height="132" rx="46" fill="#0a1017" stroke="#3ddc97" stroke-dasharray="3 4"/>
+          <text x="982" y="178" class="t">目标站点</text>
+          <text x="990" y="198" class="s">exit IP</text>
+          <text x="988" y="216" class="s">35.x.x.x</text>
+
+          <path d="M240 91 H296" class="ln"/>
+          <path d="M240 195 H296" class="ln"/>
+          <path d="M240 299 H296" class="ln"/>
+          <path d="M630 141 H696" class="lnc"/>
+          <path d="M630 188 H696" class="lnc"/>
+          <path d="M630 284 H696" class="lnc"/>
+          <path d="M930 92 C946 92 948 150 958 160" class="ln"/>
+          <path d="M930 188 H958" class="ln"/>
+          <path d="M930 284 C948 284 948 224 958 214" class="ln"/>
+
+          <path d="M320 240 H280 V200" class="dash"/>
+          <text x="252" y="236" class="s" fill="#5c6c7f">契约回写</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="swatch sw-green"></i>控制面与混合代理</span>
+        <span><i class="swatch sw-cyan"></i>上游握手与字节管道</span>
+        <span><i class="swatch sw-amber"></i>持久化与契约文件</span>
+        <span>虚线：状态回写，不是数据面</span>
+      </div>
+    </section>
+
+    <section class="doc" id="ports">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-route"/></svg></span>
+        <div><div class="kicker">03 · Ports &amp; Leases</div><h2>端口与租约模型</h2><p>端口是扩展之间的稳定契约，key 是账号与线路的身份。</p></div>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 1080 250" role="img" aria-label="端口分配模型">
+          <style>
+            .pt { fill: #0f1720; stroke: #243346; }
+            .ptd { fill: rgba(61,220,151,0.12); stroke: #3ddc97; }
+            .ptx { fill: #e6edf3; font: 600 12px ui-monospace, Consolas, monospace; }
+            .pts { fill: #8b9bb0; font: 10.5px ui-monospace, Consolas, monospace; }
+          </style>
+          <text x="24" y="28" fill="#5c6c7f" font-size="10" font-family="monospace" letter-spacing="1.5">DEFAULT GATEWAY</text>
+          <rect x="24" y="42" width="212" height="92" rx="10" class="ptd"/>
+          <text x="40" y="72" class="ptx">127.0.0.1:25001</text>
+          <text x="40" y="94" class="pts">primary 的别名</text>
+          <text x="40" y="112" class="pts">切换 primary 即换出口</text>
+
+          <text x="286" y="28" fill="#5c6c7f" font-size="10" font-family="monospace" letter-spacing="1.5">LEASE POOL · portBase + portSize</text>
+          <rect x="286" y="42" width="120" height="92" rx="10" class="ptd"/>
+          <text x="302" y="72" class="ptx">25101</text>
+          <text x="302" y="94" class="pts">ibk/a01</text>
+          <text x="302" y="112" class="pts">显式或自动</text>
+
+          <rect x="414" y="42" width="120" height="92" rx="10" class="pt"/>
+          <text x="430" y="72" class="ptx">25102</text>
+          <text x="430" y="94" class="pts">ibk/a02</text>
+          <text x="430" y="112" class="pts">持久化</text>
+
+          <rect x="542" y="42" width="120" height="92" rx="10" class="pt"/>
+          <text x="558" y="72" class="ptx">25103</text>
+          <text x="558" y="94" class="pts">sub/jp-01</text>
+          <text x="558" y="112" class="pts">订阅批量</text>
+
+          <rect x="670" y="42" width="120" height="92" rx="10" class="pt"/>
+          <text x="686" y="72" class="ptx">25104</text>
+          <text x="686" y="94" class="pts">pg/slot-07</text>
+          <text x="686" y="112" class="pts">proxygate</text>
+
+          <text x="812" y="86" class="pts" fill="#5c6c7f">…</text>
+          <text x="812" y="110" class="pts" fill="#5c6c7f">25200</text>
+
+          <text x="24" y="182" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">规则：已有 key 端口在池内则保持不变；新 key 取最低空闲口；跳过 defaultPort 与其他租约占用的口。</text>
+          <text x="24" y="206" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">显式端口：创建或 PATCH 时传 port；冲突立即 409 port_taken，不静默改口。</text>
+          <text x="24" y="230" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">端口池大小默认 100，可配置 1–1000；defaultPort 默认 25001，租约池默认 25101 起。</text>
+        </svg>
+      </div>
+      <div class="grid g2" style="margin-top:14px">
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-key"/></svg>key 命名约定</h3>
+          <div class="row"><span>账号线路</span><span>ibk/&lt;alias&gt;</span></div>
+          <div class="row"><span>订阅线路</span><span>&lt;prefix&gt;/&lt;node-slug&gt;</span></div>
+          <div class="row"><span>槽位线路</span><span>pg/&lt;slot-id&gt;</span></div>
+          <div class="row"><span>默认别名</span><span>default</span></div>
+          <p style="margin-top:8px">批量导入按节点名字生成 slug；重名自动追加 <code>-2</code>、<code>-3</code>，不覆盖已有 key。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-check"/></svg>三条不变量</h3>
+          <ul>
+            <li><b>端口稳定：</b>同一 key 的端口在重启后保持，除非你显式改口。</li>
+            <li><b>冲突显式：</b>端口被占就报错，不做“帮你换一个”的隐式行为。</li>
+            <li><b>主口可切：</b><code>primary</code> 指向哪个租约，25001 就跟随哪个。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="ingress">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-plug"/></svg></span>
+        <div><div class="kicker">04 · Ingress</div><h2>三种接入方式</h2><p>单节点、订阅、proxygate 共用同一套租约与契约，不产生第二套节点池。</p></div>
+      </div>
+      <div class="grid g3">
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-server"/></svg>手动节点</h3>
+          <p>面板「节点池」粘贴一条 URI，或调 <code>POST /api/nodes</code>。</p>
+          <ul>
+            <li><code>vless://</code> WebSocket + TLS</li>
+            <li><code>trojan://</code> WebSocket + TLS</li>
+            <li><code>socks5://</code> 账号密码可选</li>
+          </ul>
+          <p style="margin-top:8px"><span class="tag ok">稳定</span> 适合固定账号出口。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-layers"/></svg>订阅导入</h3>
+          <p>面板「订阅」填 URL，支持明文或 base64 节点列表。</p>
+          <ul>
+            <li>按 URI 去重，重复同步只更新归属</li>
+            <li>不覆盖手动节点</li>
+            <li>可选 autoLease：导入即建租约</li>
+            <li>可批量指定 key 前缀与起始端口</li>
+          </ul>
+          <p style="margin-top:8px"><span class="tag info">整池</span> 适合机场/节点集。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-gateway"/></svg>proxygate 槽位</h3>
+          <p>面板「上游」填 API 地址与 key，再「同步槽位」。</p>
+          <ul>
+            <li>槽位字段：slotId / port / country / exitIp / healthy</li>
+            <li>槽位转成 SOCKS5 租约</li>
+            <li>按国家过滤，支持轮换出口 IP</li>
+          </ul>
+          <p style="margin-top:8px"><span class="tag warn">待验证</span> 当前池子为空。</p>
+        </div>
+      </div>
+      <div class="callout warn" style="margin-top:14px">
+        <svg class="ic"><use href="#i-alert"/></svg>
+        <div><b>协议边界：</b>只支持 VLESS / Trojan over WebSocket（含 TLS）与 SOCKS5。REALITY、gRPC、H2、Shadowsocks 暂不支持；本地只跑 TCP，不提供 UDP ASSOCIATE。</div>
+      </div>
+    </section>
+
+    <section class="doc" id="panel">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-server"/></svg></span>
+        <div><div class="kicker">05 · Panel</div><h2>面板六标签</h2><p>按功能分组，不再把所有表单堆在一页。</p></div>
+      </div>
+      <div class="grid g3">
+        <div class="card tabcard">
+          <div class="num">TAB 01</div>
+          <h3><svg class="ic"><use href="#i-book"/></svg>总览</h3>
+          <ul>
+            <li>默认网关 hero：端口、HTTP / SOCKS 地址、出口 IP</li>
+            <li>租约数 / 在线线路 / 节点 / 订阅统计</li>
+            <li>线路速览与契约文件入口</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 02</div>
+          <h3><svg class="ic"><use href="#i-route"/></svg>出口线路</h3>
+          <ul>
+            <li>全部租约列表：状态、key、端口、出口 IP</li>
+            <li>复制 HTTP / SOCKS、改端口、设为主、探测、删除</li>
+            <li>新建租约：选节点、key、显式端口、国家</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 03</div>
+          <h3><svg class="ic"><use href="#i-server"/></svg>节点池</h3>
+          <ul>
+            <li>手动添加节点 URI</li>
+            <li>列表标注来源：手动 / 订阅名</li>
+            <li>单节点测试、建租约、删除</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 04</div>
+          <h3><svg class="ic"><use href="#i-layers"/></svg>订阅</h3>
+          <ul>
+            <li>添加订阅：名称、URL、key 前缀、autoLease</li>
+            <li>节点数 / 租约数 / 最近同步 / 错误</li>
+            <li>同步、批量建租约、删除（连带节点与租约）</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 05</div>
+          <h3><svg class="ic"><use href="#i-gateway"/></svg>上游</h3>
+          <ul>
+            <li>proxygate API 地址、SOCKS 主机、默认国家</li>
+            <li>API Key 与 SOCKS 密码（保存后掩码）</li>
+            <li>同步槽位、分配一个、换出口 IP</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 06</div>
+          <h3><svg class="ic"><use href="#i-terminal"/></svg>设置</h3>
+          <ul>
+            <li>默认端口、池起点、池大小、探测 URL</li>
+            <li>契约文件路径与复制</li>
+            <li>重新协调、全部探测</li>
+          </ul>
+        </div>
+      </div>
+      <div class="steps" style="margin-top:16px">
+        <div class="step"><h4>添加来源</h4><p>节点 URI、订阅 URL 或 proxygate 配置。</p></div>
+        <div class="step"><h4>建租约</h4><p>给 key；需要稳定映射就填端口。</p></div>
+        <div class="step"><h4>协调</h4><p>引擎打开混合监听，写 state 与契约。</p></div>
+        <div class="step"><h4>探测</h4><p>走真实端口取出口 IP，回写 ok / exitIp。</p></div>
+        <div class="step"><h4>消费</h4><p>其他扩展只读 byKey[key].port。</p></div>
+      </div>
+    </section>
+
+    <section class="doc" id="contract">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-file"/></svg></span>
+        <div><div class="kicker">06 · Contract</div><h2>数据契约</h2><p>数据目录默认 <code>~/.openchamber-egress-matrix</code>，可用 <code>EGRESS_MATRIX_DATA_DIR</code> 覆盖。</p></div>
+      </div>
+      <div class="grid g2">
+        <div>
+          <h3 style="margin-bottom:8px">endpoints.json</h3>
+          <div class="codebox">
+            <button class="copy" data-copy-target="ep-code">复制</button>
+            <pre id="ep-code"><code>{
+  "version": 1,
+  "updatedAt": "2026-11-15T09:21:10.972Z",
+  "host": "127.0.0.1",
+  "primary": "lease_ab12…",
+  "default": {
+    "key": "default",
+    "kind": "default",
+    "port": 25001,
+    "proxy": "http://127.0.0.1:25001",
+    "socks": "socks5://127.0.0.1:25001",
+    "exitIp": "35.91.188.19",
+    "ok": true
+  },
+  "byKey": {
+    "ibk/wbi35772": {
+      "key": "ibk/wbi35772",
+      "port": 25101,
+      "proxy": "http://127.0.0.1:25101",
+      "socks": "socks5://127.0.0.1:25101",
+      "exitIp": "35.91.188.19",
+      "ok": true
+    }
+  },
+  "lanes": [ ]
+}</code></pre>
+          </div>
+          <p style="color:var(--muted);font-size:12px;margin-top:8px">消费方约定：只认 <code>byKey[key].port</code>。key 不存在就失败，不自行拼节点、不回退直连。</p>
+        </div>
+        <div>
+          <h3 style="margin-bottom:8px">proxies.txt</h3>
+          <div class="codebox">
+            <button class="copy" data-copy-target="proxy-code">复制</button>
+            <pre id="proxy-code"><code>TH ibk/account01	http://127.0.0.1:25101	socks5://127.0.0.1:25101
+JP ibk/account02	http://127.0.0.1:25102	socks5://127.0.0.1:25102
+ANY default	http://127.0.0.1:25001	socks5://127.0.0.1:25001</code></pre>
+          </div>
+          <p style="color:var(--muted);font-size:12px;margin-top:8px">每行：<code>国家 key → HTTP → SOCKS</code>，制表符分隔，可直接粘进支持代理列表的工具。</p>
+          <h3 style="margin:16px 0 8px">state.json（关键字段）</h3>
+          <div class="codebox">
+            <button class="copy" data-copy-target="state-code">复制</button>
+            <pre id="state-code"><code>{
+  "settings": { "defaultPort": 25001, "portBase": 25101,
+                "portSize": 100, "probeUrl": "…", "primary": "lease_…" },
+  "nodes":        [{ "id", "name", "uri", "subscriptionId?" }],
+  "subscriptions":[{ "id", "name", "url", "keyPrefix", "autoLease" }],
+  "leases":       [{ "id", "key", "provider", "nodeId|slotId",
+                     "country", "port", "ok", "exitIp" }],
+  "proxygate":    { "enabled", "baseUrl", "authValue", "socksHost" },
+  "ports":        { "ibk/wbi35772": 25101 },
+  "updatedAt": "…"
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="api">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-terminal"/></svg></span>
+        <div><div class="kicker">07 · Local API</div><h2>本地 API</h2><p>监听 <code>127.0.0.1</code>，请求头 <code>Authorization: Bearer &lt;token&gt;</code>。</p></div>
+      </div>
+      <div class="filter">
+        <svg class="ic" style="color:var(--dim)"><use href="#i-search"/></svg>
+        <input id="api-filter" type="search" placeholder="过滤路径或用途，例如 leases / 订阅 / port" autocomplete="off" />
+      </div>
+      <div class="table-wrap">
+        <table id="api-table">
+          <thead><tr><th>方法</th><th>路径</th><th>用途</th><th>关键参数 / 返回</th></tr></thead>
+          <tbody>
+            <tr><td class="method m-get">GET</td><td><code>/healthz</code></td><td>存活检查</td><td><code>{ok,version}</code></td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/status</code></td><td>引擎状态、线路、契约</td><td>lanes / endpoints / files</td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/config</code></td><td>面板完整视图</td><td>settings / nodes / subscriptions / leases</td></tr>
+            <tr><td class="method m-put">PUT</td><td><code>/api/config</code></td><td>改设置或 proxygate</td><td><code>{settings}</code> 或 <code>{proxygate}</code></td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/endpoints</code></td><td>实时契约 + 文件路径</td><td><code>{ok,live,file,paths}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/nodes</code></td><td>添加静态节点</td><td><code>{name,uri}</code> · 重复 409</td></tr>
+            <tr><td class="method m-patch">PATCH</td><td><code>/api/nodes/:id</code></td><td>改名 / 改 URI</td><td><code>{name?,uri?}</code></td></tr>
+            <tr><td class="method m-del">DELETE</td><td><code>/api/nodes/:id</code></td><td>删节点并移除其租约</td><td><code>{removedLeases}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/nodes/:id/probe</code></td><td>单节点探测</td><td><code>{ok,exitIp}</code></td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/subscriptions</code></td><td>订阅列表</td><td>节点数 / 租约数 / 最近错误</td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/subscriptions</code></td><td>新增并首次同步</td><td><code>{name,url,keyPrefix,autoLease}</code></td></tr>
+            <tr><td class="method m-patch">PATCH</td><td><code>/api/subscriptions/:id</code></td><td>改名称 / URL / 前缀</td><td>同名字段可选</td></tr>
+            <tr><td class="method m-del">DELETE</td><td><code>/api/subscriptions/:id</code></td><td>删订阅、节点与租约</td><td><code>{removedNodes,removedLeases}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/subscriptions/:id/sync</code></td><td>重新拉取订阅</td><td><code>{added,updated,errors}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/subscriptions/:id/leases</code></td><td>为订阅节点批量建租约</td><td><code>{keyPrefix,startPort,country}</code></td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/leases</code></td><td>租约列表</td><td><code>{leases,primary}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/leases</code></td><td>新建静态租约</td><td><code>{nodeId,key,port?,country?,primary?}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/leases/batch</code></td><td>按订阅批量建租约</td><td><code>{subscriptionId,keyPrefix,startPort?}</code></td></tr>
+            <tr><td class="method m-patch">PATCH</td><td><code>/api/leases/:id</code></td><td>改 key / 端口 / 国家 / 主口</td><td><code>{key?,port?,country?,primary?}</code></td></tr>
+            <tr><td class="method m-del">DELETE</td><td><code>/api/leases/:id</code></td><td>删租约并释放端口</td><td><code>{ok}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/leases/:id/probe</code></td><td>走本地端口端到端探测</td><td>回写 exitIp / ok</td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/proxygate/sync</code></td><td>同步槽位为租约</td><td><code>{slots,added,updated,removed}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/proxygate/allocate</code></td><td>按国家分配槽位</td><td><code>{country}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/proxygate/rotate</code></td><td>轮换槽位出口 IP</td><td><code>{slotId}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/reconcile</code></td><td>强制重建监听</td><td>engine 状态</td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/probe</code></td><td>全部线路探测</td><td>engine 状态</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3 style="margin:18px 0 8px">错误码</h3>
+      <div class="grid g3">
+        <div class="card"><div class="row"><span>409 port_taken</span><span>端口被其他租约或默认口占用</span></div><div class="row"><span>409 lease_key_exists</span><span>租约 key 重复</span></div></div>
+        <div class="card"><div class="row"><span>400 node_missing</span><span>租约引用的节点不存在</span></div><div class="row"><span>400 invalid_port</span><span>端口不是 1–65535</span></div></div>
+        <div class="card"><div class="row"><span>502 subscription_*</span><span>订阅超时 / HTML / 空列表 / 超 2 MB</span></div><div class="row"><span>401 unauthorized</span><span>缺少或错误 Bearer token</span></div></div>
+      </div>
+    </section>
+
+    <section class="doc" id="runbook">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-shield"/></svg></span>
+        <div><div class="kicker">08 · Runbook</div><h2>运行手册</h2><p>装、跑、测、排障。</p></div>
+      </div>
+      <div class="grid g2">
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-plug"/></svg>安装到 OpenChamber</h3>
+          <ol style="padding-left:18px;color:var(--muted);font-size:12.5px">
+            <li>把仓库目录放进 <code>~/.config/openchamber/extensions/</code>。</li>
+            <li>在 <code>extensions.json</code> 的 <code>paths</code> 登记该路径。</li>
+            <li>授予 <code>service</code> 能力（<code>capabilityGrants</code>）。</li>
+            <li>重启 OpenChamber，面板列表出现 Egress Matrix。</li>
+          </ol>
+          <div class="callout warn" style="margin-top:10px"><svg class="ic"><use href="#i-alert"/></svg><div>宿主只启动已登记的扩展；只复制文件不登记，面板不会出现。</div></div>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-terminal"/></svg>开发运行</h3>
+          <div class="codebox">
+            <button class="copy" data-copy-target="dev-code">复制</button>
+            <pre id="dev-code"><code>$env:OPENCHAMBER_SERVICE_PORT=25997
+$env:EGRESS_MATRIX_DEV=1
+node service/main.js
+
+# 测试
+node --test --test-force-exit
+
+# 走默认口
+curl.exe -x http://127.0.0.1:25001 https://api.ipify.org
+curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
+          </div>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-key"/></svg>环境变量</h3>
+          <div class="row"><span>OPENCHAMBER_SERVICE_PORT</span><span>服务监听端口</span></div>
+          <div class="row"><span>OPENCHAMBER_SERVICE_TOKEN</span><span>Bearer token</span></div>
+          <div class="row"><span>EGRESS_MATRIX_DEV</span><span>1 = 允许无 token</span></div>
+          <div class="row"><span>EGRESS_MATRIX_DATA_DIR</span><span>覆盖数据目录</span></div>
+          <div class="row"><span>EGRESS_MATRIX_PORT</span><span>备用端口变量</span></div>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-check"/></svg>验证一次出口</h3>
+          <ol style="padding-left:18px;color:var(--muted);font-size:12.5px">
+            <li>面板「出口线路」点「探测」，记下 exitIp。</li>
+            <li>打开 <code>endpoints.json</code>，确认 <code>byKey</code> 同 key 的 <code>exitIp</code> 一致。</li>
+            <li><code>curl.exe -x http://127.0.0.1:25101 https://api.ipify.org</code> 再核对。</li>
+            <li>停掉宿主服务，确认消费方失败而不是直连——这是 fail-closed 的反向验证。</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="files">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-git"/></svg></span>
+        <div><div class="kicker">09 · Code Map</div><h2>代码地图</h2><p>零构建，全部 CommonJS，直接由宿主 Node 运行。</p></div>
+      </div>
+      <div class="grid g2">
+        <div class="card">
+          <div class="tree">
+<span class="dir">openchamber-egress-matrix/</span><br>
+├─ <span class="file">package.json</span> <span class="note">面板 + service 清单，v0.2.0</span><br>
+├─ <span class="file">icon.svg</span> <span class="note">扩展图标</span><br>
+├─ <span class="dir">lib/</span><br>
+│&nbsp;&nbsp;├─ <span class="file">engine.js</span> <span class="note">租约监听、reconcile、probe、发布</span><br>
+│&nbsp;&nbsp;├─ <span class="file">local-proxy.js</span> <span class="note">SOCKS5 + CONNECT + absolute-form</span><br>
+│&nbsp;&nbsp;├─ <span class="file">upstream.js</span> <span class="note">VLESS / Trojan / SOCKS5 握手与管道</span><br>
+│&nbsp;&nbsp;├─ <span class="file">ws.js</span> <span class="note">最小 WebSocket 客户端 / 帧</span><br>
+│&nbsp;&nbsp;├─ <span class="file">node-uri.js</span> <span class="note">URI 解析与协议白名单</span><br>
+│&nbsp;&nbsp;├─ <span class="file">ports.js</span> <span class="note">池分配、释放、占用检查</span><br>
+│&nbsp;&nbsp;├─ <span class="file">store.js</span> <span class="note">state / endpoints / proxies 原子写</span><br>
+│&nbsp;&nbsp;├─ <span class="file">subscriptions.js</span> <span class="note">拉取、base64、去重、导入</span><br>
+│&nbsp;&nbsp;├─ <span class="file">probe.js</span> <span class="note">经本地代理取出口 IP</span><br>
+│&nbsp;&nbsp;└─ <span class="dir">providers/</span><br>
+│&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span class="file">proxygate.js</span> <span class="note">池 API 客户端与槽位同步</span><br>
+├─ <span class="dir">service/</span><br>
+│&nbsp;&nbsp;└─ <span class="file">main.js</span> <span class="note">HTTP 路由、鉴权、configView</span><br>
+├─ <span class="dir">panel/</span><br>
+│&nbsp;&nbsp;├─ <span class="file">index.html</span> <span class="note">六标签骨架</span><br>
+│&nbsp;&nbsp;├─ <span class="file">main.js</span> <span class="note">宿主桥、渲染、动作</span><br>
+│&nbsp;&nbsp;└─ <span class="file">style.css</span> <span class="note">暗色面板样式</span><br>
+├─ <span class="dir">tests/</span> <span class="note">21 项</span><br>
+└─ <span class="dir">docs/</span><br>
+&nbsp;&nbsp;&nbsp;└─ <span class="file">architecture.html</span> <span class="note">本文档</span>
+          </div>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-flow"/></svg>关键调用链</h3>
+          <div class="row"><span>面板请求</span><span>service-request → main.js</span></div>
+          <div class="row"><span>建租约</span><span>route → claimPort → engine.reconcile</span></div>
+          <div class="row"><span>打开线路</span><span>buildDesired → openLane → mixedProxy</span></div>
+          <div class="row"><span>连接目标</span><span>local-proxy → upstream.connect</span></div>
+          <div class="row"><span>订阅同步</span><span>fetch → parse → importNodes</span></div>
+          <div class="row"><span>槽位同步</span><span>proxygate.slots → syncLeases</span></div>
+          <div class="row"><span>探测</span><span>probeViaProxy → 回写 lease → publish</span></div>
+          <p style="margin-top:10px">测试覆盖：URI 解析、SOCKS5 / CONNECT / absolute-form、VLESS WebSocket 帧、proxygate 槽位、订阅解析与导入。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="limits">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-alert"/></svg></span>
+        <div><div class="kicker">10 · Limits</div><h2>边界与排障</h2><p>先看边界，再对症。</p></div>
+      </div>
+      <div class="grid g2">
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-alert"/></svg>当前边界</h3>
+          <ul>
+            <li>只跑 TCP；不支持 UDP ASSOCIATE。</li>
+            <li>上游只支持 VLESS/Trojan over WS(+TLS) 与 SOCKS5。</li>
+            <li>本地监听默认 <code>127.0.0.1</code>，不对局域网开放。</li>
+            <li>订阅只接受明文或 base64 节点列表，HTML 登录页拒绝，上限 2 MB。</li>
+            <li>proxygate 槽位必须是可达的 SOCKS5；池空或边缘不可达时租约失败。</li>
+            <li>没有自动故障切换：同一 key 的节点挂了就 fail-closed。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-search"/></svg>排障表</h3>
+          <div class="row"><span>面板看不到扩展</span><span>登记 extensions.json 并重启</span></div>
+          <div class="row"><span>NO_SERVICE</span><span>授予 service 能力</span></div>
+          <div class="row"><span>HOST_TIMEOUT</span><span>宿主忙或服务未起，查日志</span></div>
+          <div class="row"><span>端口冲突</span><span>换端口或删旧租约（409）</span></div>
+          <div class="row"><span>exitIp 为空</span><span>探测 URL 不可达或上游握手失败</span></div>
+          <div class="row"><span>订阅导入失败</span><span>URL 需鉴权、返回 HTML 或超 2 MB</span></div>
+          <div class="row"><span>槽位同步失败</span><span>API 地址 / key / 8090 可达性</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="roadmap">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-roadmap"/></svg></span>
+        <div><div class="kicker">11 · Roadmap</div><h2>迭代路线</h2><p>按“先稳定契约，再加弹性”的顺序。</p></div>
+      </div>
+      <div class="road">
+        <div class="road-item">
+          <h4>P0 · proxygate 全链路实测 <span class="tag warn">进行中</span></h4>
+          <p>池子恢复后：槽位 → 租约端口 → 端到端出口 IP。当前只有单测，未连活实例。</p>
+        </div>
+        <div class="road-item">
+          <h4>P0 · 出口漂移告警 <span class="tag todo">待做</span></h4>
+          <p>记录首次 exitIp，探测发现变化时标记 drift；可选自动换线，避免账号出口悄悄变化。</p>
+        </div>
+        <div class="road-item p1">
+          <h4>P1 · 同国家节点池与故障切换 <span class="tag todo">待做</span></h4>
+          <p>租约绑定“国家 + 候选节点集合”，主节点失败时按顺序切换，端口保持不变。</p>
+        </div>
+        <div class="road-item p1">
+          <h4>P1 · SQLite 持久化 <span class="tag todo">待做</span></h4>
+          <p>用 <code>node:sqlite</code> 替换 state.json，支持并发写入、历史探测、租约审计与无损导入。</p>
+        </div>
+        <div class="road-item p1">
+          <h4>P1 · 批量导入与端口表 <span class="tag todo">待做</span></h4>
+          <p>CSV / JSON 批量定义 <code>key → port → 节点</code>，一次落稳几十个账号；面板提供可编辑端口矩阵。</p>
+        </div>
+        <div class="road-item p2">
+          <h4>P2 · 线路观测与限额 <span class="tag todo">待做</span></h4>
+          <p>每 lane 连接数、流量、失败率、最近错误；可配并发上限与速率上限。</p>
+        </div>
+        <div class="road-item p2">
+          <h4>P2 · 订阅定时同步与签名契约 <span class="tag todo">待做</span></h4>
+          <p>定时拉取订阅并增量建租约；endpoints.json 增加签名/校验，防止本机其他进程伪造。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="doc" id="changelog">
+      <div class="sec-head">
+        <span class="sec-icon"><svg class="ic lg"><use href="#i-check"/></svg></span>
+        <div><div class="kicker">12 · Changelog</div><h2>变更记录</h2><p>从“单节点能跑”到“多来源 + 稳定端口”。</p></div>
+      </div>
+      <div class="grid g2">
+        <div class="card">
+          <h3><span class="tag ok">v0.2.0</span> 2026-11-15</h3>
+          <ul>
+            <li>订阅接入：拉取、base64、去重、同步、批量建租约。</li>
+            <li>显式端口：创建与 PATCH 可钉端口，冲突 409。</li>
+            <li>租约 key 改名携带端口映射。</li>
+            <li>面板重构为六个功能标签。</li>
+            <li>测试扩到 21 项，含订阅模块。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span class="tag">v0.1.0</span> 2026-11-15</h3>
+          <ul>
+            <li>独立扩展骨架：混合本地代理、VLESS/Trojan/SOCKS5 上游。</li>
+            <li>租约引擎、默认网关、端到端探测、契约文件。</li>
+            <li>proxygate provider 与面板初版。</li>
+            <li>15 项测试；实机 25001 / 25101 出口验证。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer>
+  <div><span class="mono">Egress Matrix</span> · OpenChamber egress plane · v0.2.0</div>
+  <div style="margin-top:6px">文档随代码走：<span class="mono">docs/architecture.html</span> · 仓库 <a href="https://github.com/wbi35772/openchamber-egress-matrix" target="_blank" rel="noreferrer">wbi35772/openchamber-egress-matrix</a></div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  function copy(text, button) {
+    var value = String(text || '');
+    if (!value) return;
+    var done = function () {
+      if (!button) return;
+      var old = button.textContent;
+      button.textContent = '已复制';
+      setTimeout(function () { button.textContent = old; }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done).catch(fallback);
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var area = document.createElement('textarea');
+      area.value = value;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand('copy'); done(); } catch (error) { /* ignore */ }
+      document.body.removeChild(area);
+    }
+  }
+
+  document.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-copy], [data-copy-target]');
+    if (!button) return;
+    event.preventDefault();
+    var text = button.dataset.copy;
+    if (!text && button.dataset.copyTarget) {
+      var target = document.getElementById(button.dataset.copyTarget);
+      text = target ? target.innerText : '';
+    }
+    copy(text, button);
+  });
+
+  var filter = document.getElementById('api-filter');
+  if (filter) {
+    filter.addEventListener('input', function () {
+      var needle = filter.value.trim().toLowerCase();
+      var rows = document.querySelectorAll('#api-table tbody tr');
+      for (var index = 0; index < rows.length; index += 1) {
+        var row = rows[index];
+        row.style.display = !needle || row.textContent.toLowerCase().indexOf(needle) !== -1 ? '' : 'none';
+      }
+    });
+  }
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('#nav a'));
+  var sections = links.map(function (link) { return document.querySelector(link.getAttribute('href')); }).filter(Boolean);
+
+  function activate(id) {
+    links.forEach(function (link) {
+      link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+    });
+  }
+
+  if ('IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function (entries) {
+      var visible = entries
+        .filter(function (entry) { return entry.isIntersecting; })
+        .sort(function (a, b) { return b.intersectionRatio - a.intersectionRatio; })[0];
+      if (visible) activate(visible.target.id);
+    }, { rootMargin: '-15% 0px -70% 0px', threshold: [0.05, 0.3, 0.6] });
+    sections.forEach(function (section) { observer.observe(section); });
+  }
+
+  activate('overview');
+})();
+</script>
+</body>
+</html>
