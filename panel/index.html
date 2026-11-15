@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Egress Matrix</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 12h12M12 7l5 5-5 5M20 5v14"/></svg>
+        </div>
+        <div class="brand-text"><strong>EGRESS</strong><em>MATRIX</em></div>
+      </div>
+      <div class="top-actions">
+        <span class="pill" id="version-pill">v0.1.0</span>
+        <button class="ghost" data-act="refresh" type="button">刷新</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="hero" class="hero" aria-live="polite"></section>
+
+    <div class="grid">
+      <section class="card">
+        <header class="card-head">
+          <h2>租约出口</h2>
+          <span class="hint">一个租约一个稳定端口</span>
+        </header>
+        <div id="lanes" class="lanes"></div>
+      </section>
+
+      <section class="card">
+        <header class="card-head">
+          <h2>静态节点</h2>
+          <span class="hint">vless / trojan / socks5</span>
+        </header>
+        <form id="node-form" class="row-form" autocomplete="off">
+          <input name="name" placeholder="名称（可选）" />
+          <input name="uri" placeholder="vless://… 或 socks5://…" required />
+          <button class="primary" type="submit">添加</button>
+        </form>
+        <div id="nodes" class="nodes"></div>
+      </section>
+
+      <section class="card">
+        <header class="card-head">
+          <h2>proxygate</h2>
+          <span class="hint">槽位 → 租约</span>
+        </header>
+        <form id="pg-form" class="stack-form" autocomplete="off">
+          <label>地址 <input name="baseUrl" placeholder="http://HOST:8080" /></label>
+          <label>API Key <input name="authValue" type="password" placeholder="••••••" /></label>
+          <label>公开 SOCKS 主机 <input name="socksHost" placeholder="socks.example.com" /></label>
+          <label>SOCKS 密码 <input name="socksPassword" type="password" placeholder="••••••" /></label>
+          <label>国家 <input name="country" placeholder="JP（留空=任意）" /></label>
+          <div class="row-actions">
+            <button class="ghost" type="submit">保存</button>
+            <button class="primary" type="button" data-act="pg-sync">同步槽位</button>
+          </div>
+        </form>
+        <div id="pg-result" class="result"></div>
+      </section>
+
+      <section class="card">
+        <header class="card-head">
+          <h2>本机监听</h2>
+          <span class="hint">其他软件直接连这里</span>
+        </header>
+        <form id="settings-form" class="stack-form" autocomplete="off">
+          <label>默认端口 <input name="defaultPort" type="number" min="1" max="65535" /></label>
+          <label>端口池起点 <input name="portBase" type="number" min="1" max="65535" /></label>
+          <label>端口池大小 <input name="portSize" type="number" min="1" max="1000" /></label>
+          <label>探测 URL <input name="probeUrl" placeholder="https://api.ipify.org" /></label>
+          <div class="row-actions"><button class="ghost" type="submit">保存</button></div>
+        </form>
+        <div id="paths" class="paths"></div>
+      </section>
+    </div>
+
+    <footer class="foot">
+      <span id="foot-note">装入即用 · 无外部配置文件</span>
+      <span id="foot-state" class="foot-state"></span>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="./main.js"></script>
+</body>
+</html>
