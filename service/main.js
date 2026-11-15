@@ -227,20 +227,43 @@ async function probeLease(id) {
   let state = store.load();
   const lease = store.findLease(state, id);
   if (!lease) throw Object.assign(new Error('租约不存在'), { status: 404, code: 'lease_missing' });
-  let entry = [...engine.listeners.values()].find((item) => item.leaseId === id);
-  if (!entry) {
+  const lanesOf = () => [...engine.listeners.values()].filter((item) => item.leaseId === id);
+  let entries = lanesOf();
+  if (!entries.length) {
     await engine.reconcile('probe-lease');
-    entry = [...engine.listeners.values()].find((item) => item.leaseId === id);
+    entries = lanesOf();
   }
+  const entry = entries[0];
   if (!entry) {
     throw Object.assign(new Error('租约入口尚未就绪，检查节点或代理配置'), { status: 409, code: 'lane_not_ready' });
   }
-  const result = await probeViaProxy({
-    host: '127.0.0.1',
-    port: entry.port,
-    url: state.settings.probeUrl || 'https://api.ipify.org',
-    timeoutMs: 25000,
-  });
+
+  let result;
+  try {
+    result = await probeViaProxy({
+      host: '127.0.0.1',
+      port: entry.port,
+      url: state.settings.probeUrl || 'https://api.ipify.org',
+      timeoutMs: 25000,
+    });
+  } catch (error) {
+    state = store.load();
+    const failed = store.findLease(state, id);
+    if (failed) {
+      failed.ok = false;
+      failed.checkError = error.message;
+      failed.exitIpCheckedAt = new Date().toISOString();
+      store.save(state);
+    }
+    const checkedAt = new Date().toISOString();
+    for (const item of entries) {
+      item.result = { ok: false, exitIp: '', checkedAt };
+      item.lastError = error.message;
+    }
+    engine.publishNow();
+    throw error;
+  }
+
   state = store.load();
   const fresh = store.findLease(state, id);
   if (fresh) {
@@ -250,8 +273,12 @@ async function probeLease(id) {
     fresh.checkError = '';
     store.save(state);
   }
-  entry.result = { ok: true, exitIp: result.exitIp, checkedAt: new Date().toISOString() };
-  entry.lastError = '';
+  const checkedAt = new Date().toISOString();
+  for (const item of entries) {
+    item.result = { ok: true, exitIp: result.exitIp, checkedAt };
+    item.lastError = '';
+  }
+  engine.publishNow();
   return result;
 }
 
