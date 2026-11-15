@@ -17,16 +17,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const store = require('../lib/store');
-const { createEngine } = require('../lib/engine');
+const { createRouterEngine } = require('../core/router-engine');
+const { createRotationCoordinator } = require('../core/rotation-coordinator');
+const matrixStore = require('../core/matrix-store');
 const { parseNodeUri, publicNode } = require('../lib/node-uri');
 const { createProxygateClient, normalizeSlot, slotDescriptor, syncLeases } = require('../lib/providers/proxygate');
-const { probeViaProxy } = require('../lib/probe');
-const { releasePort, pool } = require('../lib/ports');
+const { releasePort } = require('../lib/ports');
 const { syncSubscription } = require('../lib/subscriptions');
+const {
+  isControlPlaneHost,
+  normalizeFingerprint,
+  normalizePrefix64,
+  normalizeRoutingPlane,
+} = require('../core/contract');
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT || process.env.EGRESS_MATRIX_PORT || 0);
 const TOKEN = String(process.env.OPENCHAMBER_SERVICE_TOKEN || '');
 const HOST = '127.0.0.1';
+const BUS_PORT = Number(process.env.OPENCHAMBER_MATRIX_BUS_PORT || 19880);
 const BODY_LIMIT = 512 * 1024;
 const MASK = '••••••';
 const VERSION = require('../package.json').version;
@@ -44,12 +52,14 @@ if (!TOKEN && process.env.EGRESS_MATRIX_DEV !== '1') {
   process.exit(1);
 }
 
-const engine = createEngine({
+const engine = createRouterEngine({
   load: store.load,
   save: store.save,
   writeEndpoints: store.writeEndpoints,
   log,
 });
+
+const rotation = createRotationCoordinator({ engine, log });
 
 const startedAt = Date.now();
 
@@ -139,6 +149,36 @@ function settingsPatch(current, patch) {
   }
   if (patch.probeUrl !== undefined) next.probeUrl = String(patch.probeUrl || 'https://api.ipify.org');
   if (patch.primary !== undefined) next.primary = String(patch.primary || '');
+  if (patch.controlDomains !== undefined) {
+    const list = Array.isArray(patch.controlDomains)
+      ? patch.controlDomains
+      : String(patch.controlDomains || '').split(/[\n,]+/);
+    next.controlDomains = list
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter((item) => /^[a-z0-9.-]+$/.test(item));
+  }
+  return next;
+}
+
+function warpPatch(current, patch) {
+  const next = Object.assign({}, current);
+  if (patch.enabled !== undefined) next.enabled = Boolean(patch.enabled);
+  if (patch.cooldownMs !== undefined) {
+    const value = Number(patch.cooldownMs);
+    if (!Number.isInteger(value) || value < 1000 || value > 3600000) {
+      throw Object.assign(new Error('cooldownMs 必须是 1000-3600000 的整数'), {
+        status: 400,
+        code: 'invalid_setting',
+      });
+    }
+    next.cooldownMs = value;
+  }
+  if (patch.endpoints !== undefined) {
+    const list = Array.isArray(patch.endpoints)
+      ? patch.endpoints
+      : String(patch.endpoints || '').split(/\n+/);
+    next.endpoints = list.map((item) => String(item || '').trim()).filter(Boolean);
+  }
   return next;
 }
 
@@ -288,6 +328,9 @@ async function applySubscription(state, subscription) {
 }
 
 function configView(state) {
+  const engineStatus = engine.status();
+  const slots = engineStatus.slots || [];
+  const slotsById = new Map(slots.map((slot) => [slot.matrixSlotId, slot]));
   return {
     ok: true,
     version: VERSION,
@@ -306,24 +349,37 @@ function configView(state) {
     }),
     subscriptions: (state.subscriptions || []).map((subscription) => subscriptionView(state, subscription)),
     proxygate: maskProxygate(state.proxygate),
-    leases: (state.leases || []).map((lease) => ({
-      id: lease.id,
-      key: lease.key,
-      provider: lease.provider,
-      nodeId: lease.nodeId || '',
-      slotId: lease.slotId || '',
-      country: lease.country || '',
-      port: lease.port || 0,
-      ok: lease.ok,
-      exitIp: lease.exitIp || '',
-      exitIpCheckedAt: lease.exitIpCheckedAt || '',
-      checkError: lease.checkError || '',
-      createdAt: lease.createdAt || '',
-    })),
+    leases: (state.leases || []).map((lease) => {
+      const slot = slotsById.get(lease.matrixSlotId) || null;
+      return {
+        id: lease.id,
+        key: lease.key,
+        provider: lease.provider,
+        nodeId: lease.nodeId || '',
+        slotId: lease.slotId || '',
+        country: lease.country || '',
+        port: slot ? slot.egressPort : (lease.egressPort || 0),
+        ok: lease.ok,
+        exitIp: lease.exitIp || '',
+        exitIpCheckedAt: lease.exitIpCheckedAt || '',
+        checkError: lease.checkError || '',
+        createdAt: lease.createdAt || '',
+        matrixSlotId: slot ? slot.matrixSlotId : (lease.matrixSlotId || ''),
+        egressPort: slot ? slot.egressPort : (lease.egressPort || 0),
+        routingPlane: normalizeRoutingPlane(slot ? slot.routingPlane : lease.routingPlane),
+        healthState: slot ? slot.healthState : 'COOLDOWN',
+        egressFingerprint: normalizeFingerprint(slot ? slot.egressFingerprint : lease.egressFingerprint),
+        leaseId: slot ? slot.leaseId : (lease.leaseId || ''),
+      };
+    }),
+    slots,
     primary: state.settings.primary || '',
     dataDir: store.DATA_DIR,
+    matrix: { dataDir: matrixStore.STATE_DIR, leases: matrixStore.LEASES_FILE, ledger: matrixStore.LEDGER_FILE },
     files: { endpoints: store.ENDPOINTS_FILE, proxies: store.PROXIES_FILE },
-    lanes: engine.status().lanes,
+    lanes: engineStatus.lanes,
+    warp: engineStatus.warp,
+    abuse: engineStatus.abuse,
   };
 }
 
@@ -344,59 +400,217 @@ async function probeLease(id) {
   let state = store.load();
   const lease = store.findLease(state, id);
   if (!lease) throw Object.assign(new Error('租约不存在'), { status: 404, code: 'lease_missing' });
-  const lanesOf = () => [...engine.listeners.values()].filter((item) => item.leaseId === id);
-  let entries = lanesOf();
-  if (!entries.length) {
+
+  if (!lease.matrixSlotId) {
     await engine.reconcile('probe-lease');
-    entries = lanesOf();
-  }
-  const entry = entries[0];
-  if (!entry) {
-    throw Object.assign(new Error('租约入口尚未就绪，检查节点或代理配置'), { status: 409, code: 'lane_not_ready' });
-  }
-
-  let result;
-  try {
-    result = await probeViaProxy({
-      host: '127.0.0.1',
-      port: entry.port,
-      url: state.settings.probeUrl || 'https://api.ipify.org',
-      timeoutMs: 25000,
-    });
-  } catch (error) {
     state = store.load();
-    const failed = store.findLease(state, id);
-    if (failed) {
-      failed.ok = false;
-      failed.checkError = error.message;
-      failed.exitIpCheckedAt = new Date().toISOString();
-      store.save(state);
-    }
-    const checkedAt = new Date().toISOString();
-    for (const item of entries) {
-      item.result = { ok: false, exitIp: '', checkedAt };
-      item.lastError = error.message;
-    }
-    engine.publishNow();
-    throw error;
+    const refreshed = store.findLease(state, id);
+    if (refreshed && refreshed.matrixSlotId) lease.matrixSlotId = refreshed.matrixSlotId;
+  }
+  if (!lease.matrixSlotId) {
+    throw Object.assign(new Error('租约尚未分配矩阵槽位，先同步节点'), {
+      status: 409,
+      code: 'lane_not_ready',
+    });
   }
 
-  state = store.load();
-  const fresh = store.findLease(state, id);
-  if (fresh) {
-    fresh.ok = true;
-    fresh.exitIp = result.exitIp;
-    fresh.exitIpCheckedAt = new Date().toISOString();
-    fresh.checkError = '';
+  const result = await engine.probeSlot(lease.matrixSlotId, { deep: true });
+  if (!result || !result.ok) {
+    throw Object.assign(new Error((result && result.error) || '出口探测失败'), {
+      status: 502,
+      code: 'probe_failed',
+      matrixSlotId: lease.matrixSlotId,
+    });
+  }
+  return {
+    ok: true,
+    matrixSlotId: lease.matrixSlotId,
+    egressPort: Number(lease.egressPort) || 0,
+    exitIp: result.exitIp || '',
+    egressFingerprint: result.fingerprint || null,
+  };
+}
+
+async function egressState() {
+  const status = engine.status();
+  let callbacks = [];
+  let events = [];
+  try { callbacks = await matrixStore.listCallbacks(); } catch (error) { log(`读取回调失败: ${error.message}`); }
+  try { events = await matrixStore.listEvents(50); } catch (error) { log(`读取旋转事件失败: ${error.message}`); }
+  return {
+    ok: true,
+    version: VERSION,
+    updatedAt: new Date().toISOString(),
+    defaultPort: status.defaultPort,
+    primary: status.primary,
+    slots: status.slots || [],
+    lanes: status.lanes || [],
+    warp: status.warp || null,
+    abuse: status.abuse || null,
+    callbacks,
+    events,
+  };
+}
+
+function resolveLeaseForSlot(state, matrixSlotId) {
+  const slot = engine.getSlot(matrixSlotId);
+  if (!slot) return null;
+  const lease = (state.leases || []).find((entry) => entry.id === slot.intentId
+    || entry.matrixSlotId === matrixSlotId);
+  return lease ? { slot, lease } : null;
+}
+
+async function rotateMatrixSlot(matrixSlotId, body = {}) {
+  const result = await rotation.rotate(String(matrixSlotId), async ({ slot }) => {
+    const state = store.load();
+    const found = resolveLeaseForSlot(state, slot.matrixSlotId);
+    if (!found) {
+      throw Object.assign(new Error('租约配置不存在'), { status: 404, code: 'lease_missing' });
+    }
+    const lease = found.lease;
+    let descriptor = null;
+
+    if (body.nodeId) {
+      const node = store.findNode(state, String(body.nodeId));
+      if (!node) throw Object.assign(new Error('节点不存在'), { status: 404, code: 'node_missing' });
+      lease.nodeId = node.id;
+      delete lease.nodeUri;
+      descriptor = parseNodeUri(node.uri);
+    } else if (body.nodeUri) {
+      descriptor = parseNodeUri(String(body.nodeUri));
+      lease.nodeUri = String(body.nodeUri);
+    } else if (body.slotId) {
+      const client = ensureProxygate(state);
+      const payload = await client.rotate(String(body.slotId));
+      const normalized = normalizeSlot(payload.slot || payload);
+      lease.slotId = normalized.slotId;
+      lease.slot = normalized;
+      descriptor = parseNodeUri(slotDescriptor(normalized, state.proxygate));
+    } else {
+      throw Object.assign(new Error('旋转需要 nodeId、nodeUri 或 slotId'), {
+        status: 400,
+        code: 'rotation_target_required',
+      });
+    }
+
+    lease.rotationCount = Number(lease.rotationCount || 0) + 1;
     store.save(state);
-  }
-  const checkedAt = new Date().toISOString();
-  for (const item of entries) {
-    item.result = { ok: true, exitIp: result.exitIp, checkedAt };
-    item.lastError = '';
-  }
-  engine.publishNow();
+
+    let probed = null;
+    try {
+      probed = await engine.probeDescriptor(descriptor, { deep: true });
+    } catch (error) {
+      log(`旋转前探测失败: ${error.message}`);
+    }
+
+    const supplied = normalizeFingerprint(body.egressFingerprint || {});
+    const exitIp = (probed && probed.exitIp) || supplied.exitIp || '';
+    if (!exitIp) {
+      throw Object.assign(new Error('换血校验失败：新上游未返回出口 IP'), {
+        status: 502,
+        code: 'rotation_probe_failed',
+      });
+    }
+    if (probed && supplied.exitIp && probed.exitIp !== supplied.exitIp) {
+      log(`旋转指纹不一致: 探测 ${probed.exitIp} / 提交 ${supplied.exitIp}，以探测为准`);
+    }
+    return {
+      descriptor,
+      egressFingerprint: {
+        exitIp,
+        ipv6Prefix64: normalizePrefix64((probed && probed.ipv6Prefix64) || supplied.ipv6Prefix64 || ''),
+        asn: (probed && probed.asn) || supplied.asn || '',
+        leaseId: '',
+      },
+    };
+  }, { reason: String(body.reason || 'manual') });
+
+  await engine.reconcile('rotation');
   return result;
+}
+
+function egressApiRoutes(req, res, url, body, isBus) {
+  if (url.pathname === '/api/v1/egress/state' && req.method === 'GET') {
+    return egressState().then((payload) => send(res, 200, payload));
+  }
+
+  if (url.pathname === '/api/v1/egress/leases' && req.method === 'GET') {
+    return matrixStore.listLeases().then((leases) => send(res, 200, { ok: true, count: leases.length, leases }));
+  }
+
+  if (url.pathname === '/api/v1/egress/events' && req.method === 'GET') {
+    const limit = Number(url.searchParams.get('limit')) || 50;
+    return matrixStore.listEvents(limit).then((events) => send(res, 200, { ok: true, events }));
+  }
+
+  if (url.pathname === '/api/v1/egress/callbacks' && req.method === 'GET') {
+    return matrixStore.listCallbacks().then((callbacks) => send(res, 200, { ok: true, callbacks }));
+  }
+
+  if (url.pathname === '/api/v1/egress/callbacks' && req.method === 'POST') {
+    return matrixStore.registerCallback({
+      clientId: String(body.clientId || '').trim(),
+      url: String(body.url || '').trim(),
+      events: Array.isArray(body.events) ? body.events : undefined,
+    }).then((callback) => send(res, 201, { ok: true, callback }));
+  }
+
+  if (url.pathname === '/api/v1/egress/callbacks' && req.method === 'DELETE') {
+    const clientId = String(url.searchParams.get('clientId') || body.clientId || '').trim();
+    if (!clientId) {
+      throw Object.assign(new Error('缺少 clientId'), { status: 400, code: 'client_id_required' });
+    }
+    return matrixStore.removeCallback(clientId).then(() => send(res, 200, { ok: true }));
+  }
+
+  if (url.pathname === '/api/v1/egress/probe' && req.method === 'POST') {
+    return engine.probeAll({ deep: Boolean(body.deep) }).then((result) => send(res, 200, {
+      ok: true,
+      result,
+      state: engine.status(),
+    }));
+  }
+
+  const slotMatch = /^\/api\/v1\/egress\/slots\/([^/]+)(?:\/(rotate|quarantine|probe))?$/.exec(url.pathname);
+  if (slotMatch) {
+    const matrixSlotId = decodeURIComponent(slotMatch[1]);
+    const action = slotMatch[2] || '';
+    if (req.method === 'GET' && !action) {
+      const slot = engine.getSlot(matrixSlotId);
+      if (!slot) throw Object.assign(new Error('槽位不存在'), { status: 404, code: 'slot_missing' });
+      return send(res, 200, { ok: true, slot });
+    }
+    if (req.method === 'POST' && action === 'rotate') {
+      return rotateMatrixSlot(matrixSlotId, body).then((slot) => send(res, 200, {
+        ok: true,
+        slot,
+        state: engine.status(),
+      }));
+    }
+    if (req.method === 'POST' && action === 'quarantine') {
+      return engine.quarantineSlot(matrixSlotId, body.reason || 'manual').then((slot) => send(res, 200, {
+        ok: true,
+        slot,
+        state: engine.status(),
+      }));
+    }
+    if (req.method === 'POST' && action === 'release') {
+      return engine.releaseSlot(matrixSlotId).then((slot) => send(res, 200, {
+        ok: true,
+        slot,
+        state: engine.status(),
+      }));
+    }
+    if (req.method === 'POST' && action === 'probe') {
+      return engine.probeSlot(matrixSlotId, { deep: body.deep !== false }).then((slot) => send(res, 200, {
+        ok: true,
+        slot,
+        state: engine.status(),
+      }));
+    }
+  }
+
+  send(res, 404, { ok: false, error: { code: 'not_found', message: `未知矩阵接口 ${req.method} ${url.pathname}` } });
 }
 
 async function syncProxygate(body) {
@@ -476,6 +690,10 @@ function nodeFromBody(body) {
 }
 
 async function listRoutes(req, res, url, body) {
+  if (url.pathname.startsWith('/api/v1/egress')) {
+    return egressApiRoutes(req, res, url, body, false);
+  }
+
   const parts = url.pathname.split('/').filter(Boolean);
   const id = parts[2] ? decodeURIComponent(parts[2]) : '';
 
@@ -497,6 +715,7 @@ async function listRoutes(req, res, url, body) {
       const state = store.load();
       if (body.settings) state.settings = settingsPatch(state.settings, body.settings);
       if (body.proxygate) state.proxygate = proxygatePatch(state.proxygate, body.proxygate);
+      if (body.warp) state.warp = warpPatch(state.warp, body.warp);
       store.save(state);
       return engine.reconcile('config').then(() => send(res, 200, configView(store.load())));
     }
@@ -844,10 +1063,57 @@ server.listen(PORT, HOST, () => {
   engine.start().catch((error) => log(`引擎启动失败: ${error.message}`));
 });
 
+/*
+ * Local co-operation bus. Loopback only, no bearer token: openchamber-instabox
+ * and openchamber-cloudflare query leases and register rotation callbacks here.
+ */
+const busServer = http.createServer((req, res) => {
+  let url;
+  try {
+    url = new URL(req.url, `http://${HOST}:${BUS_PORT}`);
+  } catch {
+    return send(res, 400, { ok: false, error: { code: 'bad_url', message: 'URL 无法解析' } });
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'access-control-allow-origin': '*',
+      'access-control-allow-headers': 'authorization,content-type,x-oc-routing-plane',
+      'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+    });
+    return res.end();
+  }
+
+  if (!url.pathname.startsWith('/api/v1/egress')) {
+    return send(res, 404, { ok: false, error: { code: 'not_found', message: '本地总线只暴露 /api/v1/egress' } });
+  }
+
+  const run = req.method === 'GET' || req.method === 'HEAD'
+    ? Promise.resolve({})
+    : readBody(req);
+  run
+    .then((body) => egressApiRoutes(req, res, url, body, true))
+    .catch((error) => {
+      if (res.headersSent) {
+        try { res.destroy(); } catch { /* ignore */ }
+        return;
+      }
+      failure(res, error);
+    });
+});
+
+busServer.on('error', (error) => log(`本地总线监听失败: ${error.message}`));
+if (BUS_PORT > 0) {
+  busServer.listen(BUS_PORT, HOST, () => {
+    log(`bus listening on http://${HOST}:${BUS_PORT}/api/v1/egress`);
+  });
+}
+
 function shutdown(signal) {
   log(`收到 ${signal}，正在关闭`);
   const done = () => {
     server.close(() => process.exit(0));
+    if (BUS_PORT > 0) busServer.close();
     setTimeout(() => process.exit(0), 3000).unref();
   };
   engine.stop().then(done, done);
@@ -856,4 +1122,4 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-module.exports = { server };
+module.exports = { server, busServer };

@@ -302,13 +302,13 @@
     <div>
       <div class="eyebrow">OpenChamber Extension · Egress Plane</div>
       <h1>Egress <span>Matrix</span></h1>
-      <p class="lede">把一个租约变成一条固定本地端口、一条独立上游线路。HTTP CONNECT 与 SOCKS5 同端口，任何本机软件直接填 <code>127.0.0.1:PORT</code>；其他扩展只读稳定契约，取不到就失败，绝不偷偷直连。</p>
+      <p class="lede">OpenChamber 的统一出口中枢：250 个固定槽位、双平面路由、<code>/64</code> 污点账本与蓝绿换血。每个槽位一个混合端口（HTTP CONNECT + SOCKS5），由 instabox 与 cloudflare 共同消费；取不到即失败，绝不偷偷直连。</p>
       <div class="badges">
-        <span class="badge green"><span class="dot"></span>v0.2.0</span>
-        <span class="badge"><b>21</b> tests</span>
+        <span class="badge green"><span class="dot"></span>v0.3.0</span>
+        <span class="badge"><b>48</b> tests</span>
+        <span class="badge"><b>250</b> matrix slots</span>
         <span class="badge"><b>0</b> runtime deps</span>
-        <span class="badge cyan">private repo</span>
-        <span class="badge"><b>6</b> panel tabs</span>
+        <span class="badge"><b>7</b> panel tabs</span>
       </div>
       <div class="hero-actions">
         <a class="btn primary" href="https://github.com/wbi35772/openchamber-egress-matrix" target="_blank" rel="noreferrer"><svg class="ic"><use href="#i-git"/></svg>GitHub 私有仓库</a>
@@ -326,16 +326,16 @@
         <div class="lane-meta">http://127.0.0.1:25001 · socks5://127.0.0.1:25001</div>
       </div>
       <div class="lane-card">
-        <div class="lane-key">ibk/wbi35772 <small>账号 A · 静态节点</small></div>
-        <div class="lane-port">:25101</div>
-        <div class="lane-meta">exit 35.91.188.19 · ok=true</div>
+        <div class="lane-key">ibk/wbi35772 <small>slot-001 · STRICT_CONTROL</small></div>
+        <div class="lane-port">:24001</div>
+        <div class="lane-meta">exit 35.91.188.19 · /64 独占 · ok=true</div>
       </div>
       <div class="lane-card">
-        <div class="lane-key">ibk/sub-jp <small>订阅节点 · 待建</small></div>
-        <div class="lane-port">:25220</div>
-        <div class="lane-meta">端口显式钉住 · 重启不变</div>
+        <div class="lane-key">cf/wbi-acct <small>slot-002 · ELASTIC_DATA</small></div>
+        <div class="lane-port">:24002</div>
+        <div class="lane-meta">静态出口失败 → WARP 溢出 · WARP_OVERFLOW</div>
       </div>
-      <div class="hp-foot"><span>endpoints.json</span><span>byKey → port</span></div>
+      <div class="hp-foot"><span>matrix-state</span><span>slots → 24000 + index</span></div>
     </div>
   </div>
 </header>
@@ -361,12 +361,13 @@
       <a href="#changelog"><svg class="ic"><use href="#i-check"/></svg>变更记录</a>
     </nav>
     <div class="side-meta">
-      <div><span>版本</span><b>0.2.0</b></div>
+      <div><span>版本</span><b>0.3.0</b></div>
       <div><span>Node</span><b>≥ 24</b></div>
       <div><span>OpenChamber</span><b>≥ 2.5</b></div>
-      <div><span>监听</span><b>127.0.0.1</b></div>
+      <div><span>槽位</span><b>slot-001…250</b></div>
+      <div><span>矩阵段</span><b>24001–24250</b></div>
       <div><span>默认口</span><b>25001</b></div>
-      <div><span>池起点</span><b>25101</b></div>
+      <div><span>总线</span><b>127.0.0.1:19880</b></div>
     </div>
   </aside>
 
@@ -378,33 +379,45 @@
       </div>
       <div class="grid g3">
         <div class="card">
-          <h3><svg class="ic"><use href="#i-gateway"/></svg>一个租约一个端口</h3>
-          <p>租约 key 与本地端口一一对应，端口持久化在 <code>state.ports</code>。重启、重协调、增删其他租约都不改变已钉住的端口。</p>
+          <h3><svg class="ic"><use href="#i-gateway"/></svg>槽位即端口</h3>
+          <p>槽位索引 N 永远映射 <code>slot-00N</code> → <code>24000 + N</code>（24001–24250）。映射只由 <code>core/sub2port.js</code> 计算，其他模块禁止自行拼端口。</p>
         </div>
         <div class="card">
-          <h3><svg class="ic"><use href="#i-shield"/></svg>Fail-closed</h3>
-          <p>消费方按 <code>byKey[key]</code> 取端口；key 不存在、线路未起、探测失败都直接失败。没有“回退直连”这个分支。</p>
+          <h3><svg class="ic"><use href="#i-shield"/></svg>双平面 Fail-closed</h3>
+          <p><code>STRICT_CONTROL</code> 只走静态出口，上游不可达立即失败；<code>ELASTIC_DATA</code> 才允许在 429/超时后溢出 WARP。控制面永不直连。</p>
         </div>
         <div class="card">
           <h3><svg class="ic"><use href="#i-layers"/></svg>混合代理同端口</h3>
           <p>同一个监听同时识别 SOCKS5 握手、HTTP CONNECT 与 absolute-form 请求。浏览器、curl、扩展都只填一个地址。</p>
         </div>
         <div class="card">
-          <h3><svg class="ic"><use href="#i-plug"/></svg>三种上游来源</h3>
-          <p>手动节点 URI、整池订阅、proxygate 槽位。来源只影响“这条线路指向哪”，不影响租约端口与契约结构。</p>
+          <h3><svg class="ic"><use href="#i-plug"/></svg>三类上游来源</h3>
+          <p>手动节点 URI、整池订阅、proxygate 槽位。来源只影响“这条线路指向哪”，不影响槽位端口与契约结构。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-key"/></svg><code>/64</code> 污点账本</h3>
+          <p>历史 <code>/64</code> 前缀与出口 IP 永久归属唯一槽位。即使租约删除、进程重启，也拒绝把同一出口身份发给另一个账号。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-flow"/></svg>蓝绿换血</h3>
+          <p><code>ROTATING</code> → 广播 <code>PRE_ROTATION_FREEZE</code>（200ms 预算）→ 换上游并校验新出口 → 更新 <code>leaseId</code> → <code>POST_ROTATION_RESUME</code>。</p>
         </div>
         <div class="card">
           <h3><svg class="ic"><use href="#i-check"/></svg>端到端探测</h3>
-          <p>探测不是问进程“你活着吗”，而是通过真实本地端口访问 <code>probeUrl</code>，把出口 IP 写回租约与契约文件。</p>
+          <p>探测不是问进程“你活着吗”，而是通过真实槽位端口访问 <code>probeUrl</code>，把出口 IP、ASN、<code>/64</code> 写回租约与契约文件。</p>
+        </div>
+        <div class="card">
+          <h3><svg class="ic"><use href="#i-server"/></svg>本地协同总线</h3>
+          <p><code>127.0.0.1:19880/api/v1/egress</code> 只绑回环、不需要 token，供 instabox / cloudflare 扩展直接读状态、注册换血回调。</p>
         </div>
         <div class="card">
           <h3><svg class="ic"><use href="#i-terminal"/></svg>零运行时依赖</h3>
-          <p>只用 <code>node:net</code>、<code>node:http</code>、<code>node:tls</code>、<code>node:crypto</code>。没有 npm 安装步骤，装进扩展目录即运行。</p>
+          <p>只用 <code>node:net</code>、<code>node:http</code>、<code>node:tls</code>、<code>node:crypto</code>、<code>node:fs</code>。没有 npm 安装步骤，装进扩展目录即运行。</p>
         </div>
       </div>
       <div class="callout" style="margin-top:14px">
         <svg class="ic"><use href="#i-flow"/></svg>
-        <div><b>数据流一句话：</b>本地软件 → 混合监听（25001 / 251xx）→ 引擎按租约选择上游 → VLESS / Trojan over WS+TLS、SOCKS5 或 proxygate 槽位 → 目标站点。出口 IP 回写到 <code>endpoints.json</code>。</div>
+        <div><b>数据流一句话：</b>本地软件 / 协作扩展 → 矩阵槽位（24001–24250）或默认网关 25001 → <code>core/router-engine.js</code> 按平面选静态出口或 WARP 池 → VLESS / Trojan over WS+TLS、SOCKS5、proxygate 槽位 → 目标站点。出口指纹回写 <code>egress-leases.json</code>、<code>subnet-taint-ledger.json</code> 与 <code>endpoints.json</code>。</div>
       </div>
     </section>
 
@@ -451,7 +464,7 @@
 
           <rect x="26" y="152" width="214" height="86" class="bx"/>
           <text x="42" y="180" class="t">其他 OpenChamber 扩展</text>
-          <text x="42" y="201" class="s">endpoints.json</text>
+          <text x="42" y="201" class="s">19880 总线 · endpoints</text>
           <text x="42" y="219" class="s">byKey[key].port</text>
 
           <rect x="26" y="256" width="214" height="86" class="bx"/>
@@ -461,19 +474,19 @@
 
           <rect x="300" y="44" width="330" height="304" class="bx-svc"/>
           <text x="320" y="72" class="t">service/main.js · 本地 HTTP API</text>
-          <text x="320" y="93" class="s">Bearer token · configView · 路由校验</text>
+          <text x="320" y="93" class="s">Bearer token · configView · 矩阵 API · 19880 总线</text>
 
           <rect x="320" y="110" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
           <text x="336" y="135" class="t">混合监听池</text>
-          <text x="336" y="155" class="s">default 25001 · leases 25101+</text>
+          <text x="336" y="155" class="s">default 25001 · slots 24001–24250</text>
 
           <rect x="320" y="184" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
-          <text x="336" y="209" class="t">engine.js · reconcile / probe</text>
-          <text x="336" y="229" class="s">签名 diff · EADDRINUSE 重排 · 端到端</text>
+          <text x="336" y="209" class="t">router-engine.js · 双平面 / 换血</text>
+          <text x="336" y="229" class="s">STRICT_CONTROL fail-closed · ELASTIC_DATA 溢出</text>
 
           <rect x="320" y="258" width="290" height="62" rx="8" fill="#0a1017" stroke="#2a3c50"/>
-          <text x="336" y="283" class="t">store.js · 原子写入</text>
-          <text x="336" y="303" class="s">state.json · endpoints.json · proxies.txt</text>
+          <text x="336" y="283" class="t">matrix-state · 原子锁</text>
+          <text x="336" y="303" class="s">egress-leases · /64 ledger · endpoints v2</text>
 
           <rect x="700" y="52" width="230" height="80" class="bx-up"/>
           <text x="716" y="80" class="t">VLESS over WS + TLS</text>
@@ -486,9 +499,9 @@
           <text x="716" y="214" class="s">同一字节管道</text>
 
           <rect x="700" y="244" width="230" height="80" class="bx-up"/>
-          <text x="716" y="272" class="t">SOCKS5 / proxygate 槽位</text>
-          <text x="716" y="292" class="s">username / password</text>
-          <text x="716" y="310" class="s">slot → lease 同步</text>
+          <text x="716" y="272" class="t">SOCKS5 / proxygate / WARP</text>
+          <text x="716" y="292" class="s">slot → lease 同步</text>
+          <text x="716" y="310" class="s">WARP 仅 ELASTIC_DATA 溢出</text>
 
           <rect x="962" y="120" width="92" height="132" rx="46" fill="#0a1017" stroke="#3ddc97" stroke-dasharray="3 4"/>
           <text x="982" y="178" class="t">目标站点</text>
@@ -520,10 +533,10 @@
     <section class="doc" id="ports">
       <div class="sec-head">
         <span class="sec-icon"><svg class="ic lg"><use href="#i-route"/></svg></span>
-        <div><div class="kicker">03 · Ports &amp; Leases</div><h2>端口与租约模型</h2><p>端口是扩展之间的稳定契约，key 是账号与线路的身份。</p></div>
+        <div><div class="kicker">03 · Slots &amp; Planes</div><h2>槽位与双平面模型</h2><p>槽位是扩展之间的稳定契约，平面决定失败时的行为。</p></div>
       </div>
       <div class="diagram">
-        <svg viewBox="0 0 1080 250" role="img" aria-label="端口分配模型">
+        <svg viewBox="0 0 1080 250" role="img" aria-label="矩阵槽位端口模型">
           <style>
             .pt { fill: #0f1720; stroke: #243346; }
             .ptd { fill: rgba(61,220,151,0.12); stroke: #3ddc97; }
@@ -534,52 +547,53 @@
           <rect x="24" y="42" width="212" height="92" rx="10" class="ptd"/>
           <text x="40" y="72" class="ptx">127.0.0.1:25001</text>
           <text x="40" y="94" class="pts">primary 的别名</text>
-          <text x="40" y="112" class="pts">切换 primary 即换出口</text>
+          <text x="40" y="112" class="pts">不在矩阵段内</text>
 
-          <text x="286" y="28" fill="#5c6c7f" font-size="10" font-family="monospace" letter-spacing="1.5">LEASE POOL · portBase + portSize</text>
+          <text x="286" y="28" fill="#5c6c7f" font-size="10" font-family="monospace" letter-spacing="1.5">MATRIX SLOTS · egressPort = 24000 + index</text>
           <rect x="286" y="42" width="120" height="92" rx="10" class="ptd"/>
-          <text x="302" y="72" class="ptx">25101</text>
-          <text x="302" y="94" class="pts">ibk/a01</text>
-          <text x="302" y="112" class="pts">显式或自动</text>
+          <text x="302" y="72" class="ptx">24001</text>
+          <text x="302" y="94" class="pts">slot-001</text>
+          <text x="302" y="112" class="pts">ibk/a01</text>
 
-          <rect x="414" y="42" width="120" height="92" rx="10" class="pt"/>
-          <text x="430" y="72" class="ptx">25102</text>
-          <text x="430" y="94" class="pts">ibk/a02</text>
-          <text x="430" y="112" class="pts">持久化</text>
+          <rect x="414" y="42" width="120" height="92" rx="10" class="ptd"/>
+          <text x="430" y="72" class="ptx">24002</text>
+          <text x="430" y="94" class="pts">slot-002</text>
+          <text x="430" y="112" class="pts">cf/acct</text>
 
           <rect x="542" y="42" width="120" height="92" rx="10" class="pt"/>
-          <text x="558" y="72" class="ptx">25103</text>
-          <text x="558" y="94" class="pts">sub/jp-01</text>
-          <text x="558" y="112" class="pts">订阅批量</text>
+          <text x="558" y="72" class="ptx">24003</text>
+          <text x="558" y="94" class="pts">slot-003</text>
+          <text x="558" y="112" class="pts">pg/slot-07</text>
 
           <rect x="670" y="42" width="120" height="92" rx="10" class="pt"/>
-          <text x="686" y="72" class="ptx">25104</text>
-          <text x="686" y="94" class="pts">pg/slot-07</text>
-          <text x="686" y="112" class="pts">proxygate</text>
+          <text x="686" y="72" class="ptx">24042</text>
+          <text x="686" y="94" class="pts">slot-042</text>
+          <text x="686" y="112" class="pts">sub/jp-01</text>
 
           <text x="812" y="86" class="pts" fill="#5c6c7f">…</text>
-          <text x="812" y="110" class="pts" fill="#5c6c7f">25200</text>
+          <text x="812" y="110" class="pts" fill="#5c6c7f">24250</text>
 
-          <text x="24" y="182" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">规则：已有 key 端口在池内则保持不变；新 key 取最低空闲口；跳过 defaultPort 与其他租约占用的口。</text>
-          <text x="24" y="206" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">显式端口：创建或 PATCH 时传 port；冲突立即 409 port_taken，不静默改口。</text>
-          <text x="24" y="230" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">端口池大小默认 100，可配置 1–1000；defaultPort 默认 25001，租约池默认 25101 起。</text>
+          <text x="24" y="182" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">规则：槽位索引决定端口，不允许别的模块自己算；已被外部进程占用的端口跳过，索引顺延到下一个空闲槽位。</text>
+          <text x="24" y="206" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">每个槽位带 routingPlane（STRICT_CONTROL / ELASTIC_DATA）与 healthState（ACTIVE / COOLDOWN / QUARANTINED / WARP_OVERFLOW / ROTATING）。</text>
+          <text x="24" y="230" fill="#8b9bb0" font-size="11.5" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif">出口指纹：exitIp · ipv6Prefix64 · asn · leaseId · updatedAt；历史 /64 与出口 IP 归属唯一的槽位，永不跨槽复用。</text>
         </svg>
       </div>
       <div class="grid g2" style="margin-top:14px">
         <div class="card">
-          <h3><svg class="ic"><use href="#i-key"/></svg>key 命名约定</h3>
-          <div class="row"><span>账号线路</span><span>ibk/&lt;alias&gt;</span></div>
-          <div class="row"><span>订阅线路</span><span>&lt;prefix&gt;/&lt;node-slug&gt;</span></div>
-          <div class="row"><span>槽位线路</span><span>pg/&lt;slot-id&gt;</span></div>
-          <div class="row"><span>默认别名</span><span>default</span></div>
-          <p style="margin-top:8px">批量导入按节点名字生成 slug；重名自动追加 <code>-2</code>、<code>-3</code>，不覆盖已有 key。</p>
+          <h3><svg class="ic"><use href="#i-key"/></svg>契约字段</h3>
+          <div class="row"><span>slotId</span><span>slot-001 … slot-250</span></div>
+          <div class="row"><span>egressPort</span><span>24000 + index</span></div>
+          <div class="row"><span>routingPlane</span><span>STRICT_CONTROL / ELASTIC_DATA</span></div>
+          <div class="row"><span>healthState</span><span>ACTIVE / COOLDOWN / QUARANTINED / WARP_OVERFLOW / ROTATING</span></div>
+          <div class="row"><span>egressFingerprint</span><span>exitIp · ipv6Prefix64 · asn · leaseId · updatedAt</span></div>
         </div>
         <div class="card">
-          <h3><svg class="ic"><use href="#i-check"/></svg>三条不变量</h3>
+          <h3><svg class="ic"><use href="#i-check"/></svg>四条不变量</h3>
           <ul>
-            <li><b>端口稳定：</b>同一 key 的端口在重启后保持，除非你显式改口。</li>
-            <li><b>冲突显式：</b>端口被占就报错，不做“帮你换一个”的隐式行为。</li>
-            <li><b>主口可切：</b><code>primary</code> 指向哪个租约，25001 就跟随哪个。</li>
+            <li><b>端口确定：</b><code>slot-N → 24000+N</code>，只有 <code>core/sub2port.js</code> 能算。</li>
+            <li><b>出口独属：</b>一个 <code>/64</code> 或出口 IP 只属于一个槽位，删除租约也不释放。</li>
+            <li><b>控制面不降级：</b><code>STRICT_CONTROL</code> 不可达即断开，绝不溢出 WARP、绝不直连。</li>
+            <li><b>换血串行：</b>同一槽位同时只允许一次 <code>ROTATING</code>，失败停在 COOLDOWN。</li>
           </ul>
         </div>
       </div>
@@ -632,7 +646,7 @@
     <section class="doc" id="panel">
       <div class="sec-head">
         <span class="sec-icon"><svg class="ic lg"><use href="#i-server"/></svg></span>
-        <div><div class="kicker">05 · Panel</div><h2>面板六标签</h2><p>按功能分组，不再把所有表单堆在一页。</p></div>
+        <div><div class="kicker">05 · Panel</div><h2>面板七标签</h2><p>原生 Web Components + Shadow DOM，零依赖，严格跟随 <code>--oc-*</code> 主题变量；15 秒静默轮询，输入聚焦时暂停。</p></div>
       </div>
       <div class="grid g3">
         <div class="card tabcard">
@@ -640,17 +654,17 @@
           <h3><svg class="ic"><use href="#i-book"/></svg>总览</h3>
           <ul>
             <li>默认网关 hero：端口、HTTP / SOCKS 地址、出口 IP</li>
-            <li>租约数 / 在线线路 / 节点 / 订阅统计</li>
-            <li>线路速览与契约文件入口</li>
+            <li>槽位健康分布：ACTIVE / COOLDOWN / WARP_OVERFLOW / QUARANTINED</li>
+            <li>总线状态、最近事件、WARP 池可用性</li>
           </ul>
         </div>
         <div class="card tabcard">
           <div class="num">TAB 02</div>
-          <h3><svg class="ic"><use href="#i-route"/></svg>出口线路</h3>
+          <h3><svg class="ic"><use href="#i-route"/></svg>槽位</h3>
           <ul>
-            <li>全部租约列表：状态、key、端口、出口 IP</li>
-            <li>复制 HTTP / SOCKS、改端口、设为主、探测、删除</li>
-            <li>新建租约：选节点、key、显式端口、国家</li>
+            <li>slot-001…250 列表：端口、平面、状态、出口 IP / <code>/64</code></li>
+            <li>复制 HTTP / SOCKS、探测、换血、隔离、释放</li>
+            <li>换血前弹出冻结提示，展示 PRE / POST 事件</li>
           </ul>
         </div>
         <div class="card tabcard">
@@ -676,100 +690,133 @@
           <h3><svg class="ic"><use href="#i-gateway"/></svg>上游</h3>
           <ul>
             <li>proxygate API 地址、SOCKS 主机、默认国家</li>
-            <li>API Key 与 SOCKS 密码（保存后掩码）</li>
+            <li>WARP 池端点与冷却时间</li>
             <li>同步槽位、分配一个、换出口 IP</li>
           </ul>
         </div>
         <div class="card tabcard">
           <div class="num">TAB 06</div>
+          <h3><svg class="ic"><use href="#i-flow"/></svg>轮转</h3>
+          <ul>
+            <li>换血事件流：PRE_ROTATION_FREEZE / POST_ROTATION_RESUME / ROTATION_FAILED</li>
+            <li>注册与管理协作扩展回调</li>
+            <li>失败槽位与 <code>leaseId</code> 变更历史</li>
+          </ul>
+        </div>
+        <div class="card tabcard">
+          <div class="num">TAB 07</div>
           <h3><svg class="ic"><use href="#i-terminal"/></svg>设置</h3>
           <ul>
-            <li>默认端口、池起点、池大小、探测 URL</li>
-            <li>契约文件路径与复制</li>
-            <li>重新协调、全部探测</li>
+            <li>默认端口、探测 URL、控制面域名白名单</li>
+            <li>WARP 开关 / 端点 / 冷却，滥用防护阈值</li>
+            <li>矩阵状态目录、总线端口、重新协调 / 全部探测</li>
           </ul>
         </div>
       </div>
       <div class="steps" style="margin-top:16px">
         <div class="step"><h4>添加来源</h4><p>节点 URI、订阅 URL 或 proxygate 配置。</p></div>
-        <div class="step"><h4>建租约</h4><p>给 key；需要稳定映射就填端口。</p></div>
-        <div class="step"><h4>协调</h4><p>引擎打开混合监听，写 state 与契约。</p></div>
-        <div class="step"><h4>探测</h4><p>走真实端口取出口 IP，回写 ok / exitIp。</p></div>
-        <div class="step"><h4>消费</h4><p>其他扩展只读 byKey[key].port。</p></div>
+        <div class="step"><h4>占槽</h4><p>引擎分配 <code>slot-N</code>，被占用的端口自动顺延。</p></div>
+        <div class="step"><h4>定平面</h4><p>账号控制面用 STRICT_CONTROL，数据面用 ELASTIC_DATA。</p></div>
+        <div class="step"><h4>探测</h4><p>走真实端口取出口 IP / ASN / <code>/64</code>，写污点账本。</p></div>
+        <div class="step"><h4>换血</h4><p>冻结 → 换上游 → 校验 → 恢复，全程串行。</p></div>
       </div>
     </section>
 
     <section class="doc" id="contract">
       <div class="sec-head">
         <span class="sec-icon"><svg class="ic lg"><use href="#i-file"/></svg></span>
-        <div><div class="kicker">06 · Contract</div><h2>数据契约</h2><p>数据目录默认 <code>~/.openchamber-egress-matrix</code>，可用 <code>EGRESS_MATRIX_DATA_DIR</code> 覆盖。</p></div>
+        <div><div class="kicker">06 · Contract</div><h2>数据契约</h2><p>矩阵共享状态默认 <code>~/.openchamber/matrix-state</code>（<code>OPENCHAMBER_MATRIX_STATE_DIR</code> 覆盖）；运行时数据默认 <code>~/.openchamber-egress-matrix</code>（<code>EGRESS_MATRIX_DATA_DIR</code> 覆盖）。</p></div>
       </div>
       <div class="grid g2">
         <div>
-          <h3 style="margin-bottom:8px">endpoints.json</h3>
+          <h3 style="margin-bottom:8px">endpoints.json（v2）</h3>
           <div class="codebox">
             <button class="copy" data-copy-target="ep-code">复制</button>
             <pre id="ep-code"><code>{
-  "version": 1,
+  "version": 2,
   "updatedAt": "2026-11-15T09:21:10.972Z",
   "host": "127.0.0.1",
   "primary": "lease_ab12…",
   "default": {
-    "key": "default",
-    "kind": "default",
-    "port": 25001,
+    "key": "default", "kind": "default", "port": 25001,
     "proxy": "http://127.0.0.1:25001",
     "socks": "socks5://127.0.0.1:25001",
-    "exitIp": "35.91.188.19",
-    "ok": true
+    "exitIp": "35.91.188.19", "ok": true
   },
   "byKey": {
     "ibk/wbi35772": {
-      "key": "ibk/wbi35772",
-      "port": 25101,
-      "proxy": "http://127.0.0.1:25101",
-      "socks": "socks5://127.0.0.1:25101",
-      "exitIp": "35.91.188.19",
-      "ok": true
+      "matrixSlotId": "slot-001", "egressPort": 24001,
+      "routingPlane": "STRICT_CONTROL", "healthState": "ACTIVE",
+      "proxy": "http://127.0.0.1:24001",
+      "socks": "socks5://127.0.0.1:24001",
+      "exitIp": "35.91.188.19", "ok": true
     }
   },
-  "lanes": [ ]
+  "lanes": [ ],
+  "slots": [ { "matrixSlotId": "slot-001", "egressPort": 24001,
+               "routingPlane": "STRICT_CONTROL", "healthState": "ACTIVE",
+               "egressFingerprint": { "exitIp": "35.91.188.19",
+                 "ipv6Prefix64": "2001:db8:aa:0::/64",
+                 "asn": "AS16509", "leaseId": "lease_ab12…",
+                 "updatedAt": 1794765508990 } } ]
 }</code></pre>
           </div>
-          <p style="color:var(--muted);font-size:12px;margin-top:8px">消费方约定：只认 <code>byKey[key].port</code>。key 不存在就失败，不自行拼节点、不回退直连。</p>
+          <p style="color:var(--muted);font-size:12px;margin-top:8px">消费方约定：只认 <code>byKey[key].egressPort</code> 或 <code>slots[].egressPort</code>。key 不存在就失败，不自行拼节点、不回退直连。</p>
         </div>
         <div>
-          <h3 style="margin-bottom:8px">proxies.txt</h3>
+          <h3 style="margin-bottom:8px">egress-leases.json</h3>
           <div class="codebox">
-            <button class="copy" data-copy-target="proxy-code">复制</button>
-            <pre id="proxy-code"><code>TH ibk/account01	http://127.0.0.1:25101	socks5://127.0.0.1:25101
-JP ibk/account02	http://127.0.0.1:25102	socks5://127.0.0.1:25102
-ANY default	http://127.0.0.1:25001	socks5://127.0.0.1:25001</code></pre>
-          </div>
-          <p style="color:var(--muted);font-size:12px;margin-top:8px">每行：<code>国家 key → HTTP → SOCKS</code>，制表符分隔，可直接粘进支持代理列表的工具。</p>
-          <h3 style="margin:16px 0 8px">state.json（关键字段）</h3>
-          <div class="codebox">
-            <button class="copy" data-copy-target="state-code">复制</button>
-            <pre id="state-code"><code>{
-  "settings": { "defaultPort": 25001, "portBase": 25101,
-                "portSize": 100, "probeUrl": "…", "primary": "lease_…" },
-  "nodes":        [{ "id", "name", "uri", "subscriptionId?" }],
-  "subscriptions":[{ "id", "name", "url", "keyPrefix", "autoLease" }],
-  "leases":       [{ "id", "key", "provider", "nodeId|slotId",
-                     "country", "port", "ok", "exitIp" }],
-  "proxygate":    { "enabled", "baseUrl", "authValue", "socksHost" },
-  "ports":        { "ibk/wbi35772": 25101 },
-  "updatedAt": "…"
+            <button class="copy" data-copy-target="lease-code">复制</button>
+            <pre id="lease-code"><code>{
+  "version": 1,
+  "updatedAt": 1794765508990,
+  "leases": [{
+    "matrixSlotId": "slot-001", "egressPort": 24001,
+    "routingPlane": "STRICT_CONTROL", "healthState": "ACTIVE",
+    "egressFingerprint": { "exitIp", "ipv6Prefix64", "asn",
+                          "leaseId", "updatedAt" },
+    "leaseId": "lease_ab12…#1", "intentId": "lease_ab12…",
+    "key": "ibk/wbi35772", "nodeId": "node_…"
+  }]
 }</code></pre>
           </div>
+          <h3 style="margin:16px 0 8px">subnet-taint-ledger.json</h3>
+          <div class="codebox">
+            <button class="copy" data-copy-target="ledger-code">复制</button>
+            <pre id="ledger-code"><code>{
+  "version": 1,
+  "prefixes": { "2001:db8:aa:0::/64": { "matrixSlotId": "slot-001",
+                "leaseId": "lease_ab12…", "firstSeenAt", "lastSeenAt" } },
+  "exitIps":  { "35.91.188.19": { "matrixSlotId": "slot-002",
+                "leaseId": "lease_…", "firstSeenAt", "lastSeenAt" } }
+}</code></pre>
+          </div>
+          <p style="color:var(--muted);font-size:12px;margin-top:8px">同一 <code>/64</code> 或出口 IP 只能属于一个槽位；删除租约不会释放归属，跨槽声明返回 <code>409 subnet_tainted</code>。</p>
         </div>
+      </div>
+      <h3 style="margin:18px 0 8px">state.json（关键字段）</h3>
+      <div class="codebox">
+        <button class="copy" data-copy-target="state-code">复制</button>
+        <pre id="state-code"><code>{
+  "version": 2,
+  "settings": { "defaultPort": 25001, "probeUrl": "…", "primary": "lease_…",
+                "controlDomains": ["api.cloudflare.com", "api.instabox.tech", "…"] },
+  "warp":  { "enabled": false, "endpoints": [], "cooldownMs": 60000 },
+  "nodes": [{ "id", "name", "uri", "subscriptionId?" }],
+  "subscriptions": [{ "id", "name", "url", "keyPrefix", "autoLease" }],
+  "leases": [{ "id", "key", "provider", "nodeId|slotId", "country",
+               "matrixSlotId", "egressPort", "routingPlane",
+               "healthState", "egressFingerprint" }],
+  "proxygate": { "enabled", "baseUrl", "authValue", "socksHost" },
+  "updatedAt": "…"
+}</code></pre>
       </div>
     </section>
 
     <section class="doc" id="api">
       <div class="sec-head">
         <span class="sec-icon"><svg class="ic lg"><use href="#i-terminal"/></svg></span>
-        <div><div class="kicker">07 · Local API</div><h2>本地 API</h2><p>监听 <code>127.0.0.1</code>，请求头 <code>Authorization: Bearer &lt;token&gt;</code>。</p></div>
+        <div><div class="kicker">07 · Local API</div><h2>本地 API</h2><p>宿主 API 监听 <code>127.0.0.1</code>，请求头 <code>Authorization: Bearer &lt;token&gt;</code>；协作总线 <code>127.0.0.1:19880</code> 只绑回环、不需要 token。</p></div>
       </div>
       <div class="filter">
         <svg class="ic" style="color:var(--dim)"><use href="#i-search"/></svg>
@@ -805,14 +852,33 @@ ANY default	http://127.0.0.1:25001	socks5://127.0.0.1:25001</code></pre>
             <tr><td class="method m-post">POST</td><td><code>/api/proxygate/rotate</code></td><td>轮换槽位出口 IP</td><td><code>{slotId}</code></td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/reconcile</code></td><td>强制重建监听</td><td>engine 状态</td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/probe</code></td><td>全部线路探测</td><td>engine 状态</td></tr>
+            <tr><td class="method m-get">GET</td><td><code>:19880/api/v1/egress/state</code></td><td>总线：矩阵状态</td><td>slots / lanes / warp / abuse</td></tr>
+            <tr><td class="method m-get">GET</td><td><code>:19880/api/v1/egress/leases</code></td><td>总线：全部槽位租约</td><td><code>{count,leases}</code></td></tr>
+            <tr><td class="method m-get">GET</td><td><code>:19880/api/v1/egress/events</code></td><td>总线：换血事件</td><td>PRE / POST / FAILED</td></tr>
+            <tr><td class="method m-get">GET</td><td><code>:19880/api/v1/egress/callbacks</code></td><td>总线：已注册回调</td><td><code>{callbacks}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/callbacks</code></td><td>注册换血回调</td><td><code>{clientId,url,events}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/probe</code></td><td>总线：探测槽位</td><td><code>{matrixSlotId}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/probe</code></td><td>槽位端到端探测</td><td>回写 exitIp / <code>/64</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/rotate</code></td><td>蓝绿换血</td><td>冻结 → 校验 → 恢复</td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/quarantine</code></td><td>隔离槽位</td><td><code>{lockMs}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/release</code></td><td>解除隔离 / 释放</td><td><code>{ok}</code></td></tr>
           </tbody>
         </table>
       </div>
+      <div class="callout" style="margin-top:14px">
+        <svg class="ic"><use href="#i-shield"/></svg>
+        <div><b>平面覆盖：</b>混合监听识别请求头 <code>X-OC-Routing-Plane: STRICT_CONTROL | ELASTIC_DATA</code>，单次请求即可强制平面；普通 HTTP 转发前会剥离该头。控制面域名（<code>settings.controlDomains</code>）命中时自动按 STRICT_CONTROL 处理。</div>
+      </div>
       <h3 style="margin:18px 0 8px">错误码</h3>
       <div class="grid g3">
-        <div class="card"><div class="row"><span>409 port_taken</span><span>端口被其他租约或默认口占用</span></div><div class="row"><span>409 lease_key_exists</span><span>租约 key 重复</span></div></div>
-        <div class="card"><div class="row"><span>400 node_missing</span><span>租约引用的节点不存在</span></div><div class="row"><span>400 invalid_port</span><span>端口不是 1–65535</span></div></div>
+        <div class="card"><div class="row"><span>409 lease_key_exists</span><span>租约 key 重复</span></div><div class="row"><span>409 slots_exhausted</span><span>250 个槽位已耗尽</span></div></div>
+        <div class="card"><div class="row"><span>409 subnet_tainted</span><span>出口 /64 或 IP 属于其他槽位</span></div><div class="row"><span>409 rotation_in_progress</span><span>该槽位正在换血</span></div></div>
+        <div class="card"><div class="row"><span>502 rotation_probe_failed</span><span>新上游没有可用出口 IP</span></div><div class="row"><span>502 rotation_identity_invalid</span><span>新指纹缺出口 IP 或 /64 非法</span></div></div>
+      </div>
+      <div class="grid g3" style="margin-top:10px">
+        <div class="card"><div class="row"><span>409 slot_quarantined</span><span>槽位被滥用防护隔离</span></div><div class="row"><span>400 invalid_claim</span><span>污点账本声明为空</span></div></div>
         <div class="card"><div class="row"><span>502 subscription_*</span><span>订阅超时 / HTML / 空列表 / 超 2 MB</span></div><div class="row"><span>401 unauthorized</span><span>缺少或错误 Bearer token</span></div></div>
+        <div class="card"><div class="row"><span>400 abuse_scan_locked</span><span>高危端口扫描触发锁定</span></div><div class="row"><span>400 metadata_endpoint_blocked</span><span>云元数据目标被拦截</span></div></div>
       </div>
     </section>
 
@@ -836,33 +902,36 @@ ANY default	http://127.0.0.1:25001	socks5://127.0.0.1:25001</code></pre>
           <h3><svg class="ic"><use href="#i-terminal"/></svg>开发运行</h3>
           <div class="codebox">
             <button class="copy" data-copy-target="dev-code">复制</button>
-            <pre id="dev-code"><code>$env:OPENCHAMBER_SERVICE_PORT=25997
+            <pre id="dev-code"><code>$env:OPENCHAMBER_SERVICE_PORT=28901
+$env:OPENCHAMBER_MATRIX_BUS_PORT=19880
 $env:EGRESS_MATRIX_DEV=1
 node service/main.js
 
 # 测试
 node --test --test-force-exit
 
-# 走默认口
+# 走默认口与槽位口
 curl.exe -x http://127.0.0.1:25001 https://api.ipify.org
-curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
+curl.exe -x http://127.0.0.1:24002 https://api.ipify.org
+curl.exe -sS http://127.0.0.1:19880/api/v1/egress/state</code></pre>
           </div>
         </div>
         <div class="card">
           <h3><svg class="ic"><use href="#i-key"/></svg>环境变量</h3>
           <div class="row"><span>OPENCHAMBER_SERVICE_PORT</span><span>服务监听端口</span></div>
           <div class="row"><span>OPENCHAMBER_SERVICE_TOKEN</span><span>Bearer token</span></div>
+          <div class="row"><span>OPENCHAMBER_MATRIX_BUS_PORT</span><span>协作总线端口（默认 19880）</span></div>
+          <div class="row"><span>OPENCHAMBER_MATRIX_STATE_DIR</span><span>共享矩阵状态目录</span></div>
           <div class="row"><span>EGRESS_MATRIX_DEV</span><span>1 = 允许无 token</span></div>
-          <div class="row"><span>EGRESS_MATRIX_DATA_DIR</span><span>覆盖数据目录</span></div>
-          <div class="row"><span>EGRESS_MATRIX_PORT</span><span>备用端口变量</span></div>
+          <div class="row"><span>EGRESS_MATRIX_DATA_DIR</span><span>覆盖本扩展数据目录</span></div>
         </div>
         <div class="card">
           <h3><svg class="ic"><use href="#i-check"/></svg>验证一次出口</h3>
           <ol style="padding-left:18px;color:var(--muted);font-size:12.5px">
-            <li>面板「出口线路」点「探测」，记下 exitIp。</li>
-            <li>打开 <code>endpoints.json</code>，确认 <code>byKey</code> 同 key 的 <code>exitIp</code> 一致。</li>
-            <li><code>curl.exe -x http://127.0.0.1:25101 https://api.ipify.org</code> 再核对。</li>
-            <li>停掉宿主服务，确认消费方失败而不是直连——这是 fail-closed 的反向验证。</li>
+            <li>面板「槽位」点「探测」，记下 <code>exitIp</code> 与槽位口。</li>
+            <li>打开 <code>endpoints.json</code>，确认 <code>slots[]</code> 同槽位的 <code>egressPort</code> 与 <code>exitIp</code> 一致。</li>
+            <li><code>curl.exe -x http://127.0.0.1:24002 https://api.ipify.org</code> 再核对。</li>
+            <li>控制面加 <code>X-OC-Routing-Plane: STRICT_CONTROL</code>；停上游后应 502，而不是直连。</li>
           </ol>
         </div>
       </div>
@@ -877,27 +946,36 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
         <div class="card">
           <div class="tree">
 <span class="dir">openchamber-egress-matrix/</span><br>
-├─ <span class="file">package.json</span> <span class="note">面板 + service 清单，v0.2.0</span><br>
+├─ <span class="file">package.json</span> <span class="note">面板 + service 清单，v0.3.0</span><br>
 ├─ <span class="file">icon.svg</span> <span class="note">扩展图标</span><br>
+├─ <span class="dir">core/</span> <span class="note">矩阵核心</span><br>
+│&nbsp;&nbsp;├─ <span class="file">contract.js</span> <span class="note">字段 / 枚举 / 端口映射唯一来源</span><br>
+│&nbsp;&nbsp;├─ <span class="file">store-lock.js</span> <span class="note">O_EXCL 锁 + 原子 JSON</span><br>
+│&nbsp;&nbsp;├─ <span class="file">matrix-store.js</span> <span class="note">租约 / 回调 / 事件文件</span><br>
+│&nbsp;&nbsp;├─ <span class="file">subnet-taint-ledger.js</span> <span class="note">/64 与出口 IP 历史归属</span><br>
+│&nbsp;&nbsp;├─ <span class="file">sub2port.js</span> <span class="note">槽位 → 24000+N 确定性映射</span><br>
+│&nbsp;&nbsp;├─ <span class="file">abuse-guard.js</span> <span class="note">内网 / 元数据拦截与扫描隔离</span><br>
+│&nbsp;&nbsp;├─ <span class="file">warp-pool.js</span> <span class="note">ELASTIC_DATA 溢出池</span><br>
+│&nbsp;&nbsp;├─ <span class="file">rotation-coordinator.js</span> <span class="note">冻结 → 校验 → 恢复</span><br>
+│&nbsp;&nbsp;└─ <span class="file">router-engine.js</span> <span class="note">槽位运行时、双平面、发布</span><br>
 ├─ <span class="dir">lib/</span><br>
-│&nbsp;&nbsp;├─ <span class="file">engine.js</span> <span class="note">租约监听、reconcile、probe、发布</span><br>
 │&nbsp;&nbsp;├─ <span class="file">local-proxy.js</span> <span class="note">SOCKS5 + CONNECT + absolute-form</span><br>
 │&nbsp;&nbsp;├─ <span class="file">upstream.js</span> <span class="note">VLESS / Trojan / SOCKS5 握手与管道</span><br>
 │&nbsp;&nbsp;├─ <span class="file">ws.js</span> <span class="note">最小 WebSocket 客户端 / 帧</span><br>
 │&nbsp;&nbsp;├─ <span class="file">node-uri.js</span> <span class="note">URI 解析与协议白名单</span><br>
-│&nbsp;&nbsp;├─ <span class="file">ports.js</span> <span class="note">池分配、释放、占用检查</span><br>
-│&nbsp;&nbsp;├─ <span class="file">store.js</span> <span class="note">state / endpoints / proxies 原子写</span><br>
+│&nbsp;&nbsp;├─ <span class="file">store.js</span> <span class="note">state / endpoints 原子写（v2）</span><br>
 │&nbsp;&nbsp;├─ <span class="file">subscriptions.js</span> <span class="note">拉取、base64、去重、导入</span><br>
-│&nbsp;&nbsp;├─ <span class="file">probe.js</span> <span class="note">经本地代理取出口 IP</span><br>
+│&nbsp;&nbsp;├─ <span class="file">probe.js</span> <span class="note">经本地代理做 TLS 健康探测</span><br>
+│&nbsp;&nbsp;├─ <span class="file">identity-probe.js</span> <span class="note">出口 IP / ASN / IPv6 指纹</span><br>
+│&nbsp;&nbsp;├─ <span class="file">engine.js</span> <span class="note">v0.2 旧引擎（已被 core 取代）</span><br>
 │&nbsp;&nbsp;└─ <span class="dir">providers/</span><br>
 │&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span class="file">proxygate.js</span> <span class="note">池 API 客户端与槽位同步</span><br>
 ├─ <span class="dir">service/</span><br>
-│&nbsp;&nbsp;└─ <span class="file">main.js</span> <span class="note">HTTP 路由、鉴权、configView</span><br>
-├─ <span class="dir">panel/</span><br>
-│&nbsp;&nbsp;├─ <span class="file">index.html</span> <span class="note">六标签骨架</span><br>
-│&nbsp;&nbsp;├─ <span class="file">main.js</span> <span class="note">宿主桥、渲染、动作</span><br>
-│&nbsp;&nbsp;└─ <span class="file">style.css</span> <span class="note">暗色面板样式</span><br>
-├─ <span class="dir">tests/</span> <span class="note">21 项</span><br>
+│&nbsp;&nbsp;└─ <span class="file">main.js</span> <span class="note">HTTP 路由、鉴权、19880 总线</span><br>
+├─ <span class="dir">ui/</span><br>
+│&nbsp;&nbsp;├─ <span class="file">index.html</span> <span class="note">面板入口</span><br>
+│&nbsp;&nbsp;└─ <span class="file">egress-matrix-panel.js</span> <span class="note">Web Component，七标签，Shadow DOM</span><br>
+├─ <span class="dir">tests/</span> <span class="note">48 项</span><br>
 └─ <span class="dir">docs/</span><br>
 &nbsp;&nbsp;&nbsp;└─ <span class="file">architecture.html</span> <span class="note">本文档</span>
           </div>
@@ -905,13 +983,14 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
         <div class="card">
           <h3><svg class="ic"><use href="#i-flow"/></svg>关键调用链</h3>
           <div class="row"><span>面板请求</span><span>service-request → main.js</span></div>
-          <div class="row"><span>建租约</span><span>route → claimPort → engine.reconcile</span></div>
-          <div class="row"><span>打开线路</span><span>buildDesired → openLane → mixedProxy</span></div>
-          <div class="row"><span>连接目标</span><span>local-proxy → upstream.connect</span></div>
-          <div class="row"><span>订阅同步</span><span>fetch → parse → importNodes</span></div>
-          <div class="row"><span>槽位同步</span><span>proxygate.slots → syncLeases</span></div>
-          <div class="row"><span>探测</span><span>probeViaProxy → 回写 lease → publish</span></div>
-          <p style="margin-top:10px">测试覆盖：URI 解析、SOCKS5 / CONNECT / absolute-form、VLESS WebSocket 帧、proxygate 槽位、订阅解析与导入。</p>
+          <div class="row"><span>建租约</span><span>route → sub2port.reserve → engine.sync</span></div>
+          <div class="row"><span>占槽</span><span>syncOnce → portBusy 顺延 → openLane</span></div>
+          <div class="row"><span>连接目标</span><span>local-proxy → connectFor → 平面判定</span></div>
+          <div class="row"><span>控制面失败</span><span>fail-closed 502，不回退 WARP/直连</span></div>
+          <div class="row"><span>数据面失败</span><span>warp.connect → WARP_OVERFLOW</span></div>
+          <div class="row"><span>换血</span><span>rotate → 深探 → ledger.claim → resume</span></div>
+          <div class="row"><span>探测</span><span>probeViaProxy + identity-probe → publish</span></div>
+          <p style="margin-top:10px">测试覆盖：契约映射、文件锁并发、污点账本、滥用防护、WARP 池、换血状态机、双平面透传、URI / SOCKS5 / VLESS / 订阅 / proxygate。</p>
         </div>
       </div>
     </section>
@@ -926,11 +1005,12 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
           <h3><svg class="ic"><use href="#i-alert"/></svg>当前边界</h3>
           <ul>
             <li>只跑 TCP；不支持 UDP ASSOCIATE。</li>
-            <li>上游只支持 VLESS/Trojan over WS(+TLS) 与 SOCKS5。</li>
-            <li>本地监听默认 <code>127.0.0.1</code>，不对局域网开放。</li>
-            <li>订阅只接受明文或 base64 节点列表，HTML 登录页拒绝，上限 2 MB。</li>
-            <li>proxygate 槽位必须是可达的 SOCKS5；池空或边缘不可达时租约失败。</li>
-            <li>没有自动故障切换：同一 key 的节点挂了就 fail-closed。</li>
+            <li>槽位固定 <code>24001-24250</code>；被外部进程占用的端口顺延到下一个空槽，映射落盘后不再改。</li>
+            <li>上游支持 VLESS/Trojan over WS(+TLS)、SOCKS5 与 proxygate 槽位；WARP 池只服务 ELASTIC_DATA。</li>
+            <li>本地监听与总线都只绑 <code>127.0.0.1</code>，不对局域网开放。</li>
+            <li>STRICT_CONTROL 不可达即 502；ELASTIC_DATA 在 WARP 关闭时同样 502，都不回退直连。</li>
+            <li>订阅只接受明文或 base64 节点列表，HTML 拒绝，上限 2 MB。</li>
+            <li>高危端口密集探测会隔离槽位；内网 / 云元数据目标直接拒绝。</li>
           </ul>
         </div>
         <div class="card">
@@ -938,8 +1018,10 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
           <div class="row"><span>面板看不到扩展</span><span>登记 extensions.json 并重启</span></div>
           <div class="row"><span>NO_SERVICE</span><span>授予 service 能力</span></div>
           <div class="row"><span>HOST_TIMEOUT</span><span>宿主忙或服务未起，查日志</span></div>
-          <div class="row"><span>端口冲突</span><span>换端口或删旧租约（409）</span></div>
+          <div class="row"><span>槽位端口被占</span><span>自动顺延下一个空槽；仍冲突查 24001-24250</span></div>
           <div class="row"><span>exitIp 为空</span><span>探测 URL 不可达或上游握手失败</span></div>
+          <div class="row"><span>subnet_tainted</span><span>该 /64 或出口 IP 已归其他槽位，换上游</span></div>
+          <div class="row"><span>rotation_probe_failed</span><span>新上游探不出出口 IP，槽位保持 COOLDOWN</span></div>
           <div class="row"><span>订阅导入失败</span><span>URL 需鉴权、返回 HTML 或超 2 MB</span></div>
           <div class="row"><span>槽位同步失败</span><span>API 地址 / key / 8090 可达性</span></div>
         </div>
@@ -986,11 +1068,25 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
     <section class="doc" id="changelog">
       <div class="sec-head">
         <span class="sec-icon"><svg class="ic lg"><use href="#i-check"/></svg></span>
-        <div><div class="kicker">12 · Changelog</div><h2>变更记录</h2><p>从“单节点能跑”到“多来源 + 稳定端口”。</p></div>
+        <div><div class="kicker">12 · Changelog</div><h2>变更记录</h2><p>从单扩展代理到 OpenChamber 统一出口矩阵。</p></div>
       </div>
       <div class="grid g2">
         <div class="card">
-          <h3><span class="tag ok">v0.2.0</span> 2026-11-15</h3>
+          <h3><span class="tag ok">v0.3.0</span> 2026-11-15</h3>
+          <ul>
+            <li>统一契约：<code>matrixSlotId</code> / <code>egressPort</code> / <code>routingPlane</code> / <code>healthState</code> / <code>egressFingerprint</code>。</li>
+            <li>矩阵槽位 <code>24001-24250</code>；外部占用的端口自动顺延到下一个空槽。</li>
+            <li>双平面路由：控制面域名与 <code>X-OC-Routing-Plane</code> 强制单次平面；STRICT_CONTROL fail-closed。</li>
+            <li>ELASTIC_DATA 失败切 WARP 池并标记 <code>WARP_OVERFLOW</code>。</li>
+            <li><code>/64</code> 污点账本；换血要求新出口 IP 与 IPv6 前缀可验证。</li>
+            <li>蓝绿换血：<code>PRE_ROTATION_FREEZE</code> → 切换 → <code>POST_ROTATION_RESUME</code>，失败保持 COOLDOWN。</li>
+            <li><code>127.0.0.1:19880</code> 本地总线：状态、租约、事件、回调、槽位动作。</li>
+            <li>面板改为零依赖 Web Component，七标签，Shadow DOM + <code>--oc-*</code> 变量。</li>
+            <li>测试扩到 48 项，覆盖矩阵核心与双平面透传。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span class="tag">v0.2.0</span> 2026-11-15</h3>
           <ul>
             <li>订阅接入：拉取、base64、去重、同步、批量建租约。</li>
             <li>显式端口：创建与 PATCH 可钉端口，冲突 409。</li>
@@ -1014,7 +1110,7 @@ curl.exe --socks5-hostname 127.0.0.1:25001 https://api.ipify.org</code></pre>
 </div>
 
 <footer>
-  <div><span class="mono">Egress Matrix</span> · OpenChamber egress plane · v0.2.0</div>
+  <div><span class="mono">Egress Matrix</span> · OpenChamber egress plane · v0.3.0</div>
   <div style="margin-top:6px">文档随代码走：<span class="mono">docs/architecture.html</span> · 仓库 <a href="https://github.com/wbi35772/openchamber-egress-matrix" target="_blank" rel="noreferrer">wbi35772/openchamber-egress-matrix</a></div>
 </footer>
 
