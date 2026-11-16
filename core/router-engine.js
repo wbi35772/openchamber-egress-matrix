@@ -562,6 +562,16 @@ function createRouterEngine(options = {}) {
       slot.nodeId = lease.nodeId || '';
       slot.slotId = lease.slotId || '';
       slot.country = lease.country || '';
+      if (!slot.country && slot.nodeId) {
+        const node = store.findNode(state, slot.nodeId);
+        const code = node && node.lastCheck && node.lastCheck.ok
+          ? String(node.lastCheck.countryCode || '').toUpperCase()
+          : '';
+        if (code) {
+          slot.country = code;
+          lease.country = code;
+        }
+      }
       slot.routingPlane = contract.normalizeRoutingPlane(lease.routingPlane, slot.routingPlane);
       if (lease.createdAt) slot.createdAt = lease.createdAt;
       if (slot.healthState === 'QUARANTINED') lease.healthState = 'QUARANTINED';
@@ -825,6 +835,7 @@ function createRouterEngine(options = {}) {
   }
 
   async function probeDescriptor(descriptor, options = {}) {
+    const started = Date.now();
     const proxy = await createMixedProxy({
       host: '127.0.0.1',
       port: 0,
@@ -841,13 +852,20 @@ function createRouterEngine(options = {}) {
       const exitIp = String((result && result.exitIp) || '');
       let identity = null;
       if (options.deep) {
-        identity = await probeIdentity({ port: proxy.port, timeoutMs: 20000 });
+        identity = await probeIdentity({
+          port: proxy.port,
+          timeoutMs: 20000,
+          ipv6: options.ipv6 !== false,
+        });
       }
       return {
         ok: true,
         exitIp: (identity && identity.exitIp) || exitIp,
         ipv6Prefix64: (identity && identity.ipv6) || '',
         asn: (identity && identity.asn) || '',
+        country: (identity && identity.country) || '',
+        countryCode: (identity && identity.countryCode) || '',
+        latencyMs: Date.now() - started,
         port: proxy.port,
       };
     } finally {
@@ -855,7 +873,8 @@ function createRouterEngine(options = {}) {
     }
   }
 
-  async function probeNode(nodeId) {
+  async function probeNode(nodeId, options = {}) {
+    const persist = options.persist !== false;
     const state = load();
     const node = store.findNode(state, nodeId);
     if (!node) {
@@ -863,14 +882,42 @@ function createRouterEngine(options = {}) {
     }
     try {
       const descriptor = parseNodeUri(node.uri);
-      const result = await probeDescriptor(descriptor);
-      node.lastCheck = { ok: true, exitIp: result.exitIp, checkedAt: new Date().toISOString(), error: '' };
-      save(state);
-      return result;
+      const result = await probeDescriptor(descriptor, {
+        deep: options.deep !== false,
+        ipv6: options.ipv6 === true,
+      });
+      const lastCheck = {
+        ok: true,
+        exitIp: result.exitIp,
+        asn: result.asn || '',
+        country: result.country || '',
+        countryCode: result.countryCode || '',
+        latencyMs: result.latencyMs || 0,
+        checkedAt: new Date().toISOString(),
+        error: '',
+      };
+      if (persist) {
+        node.lastCheck = lastCheck;
+        save(state);
+      }
+      return Object.assign({ nodeId, ok: true }, result, { lastCheck });
     } catch (error) {
-      node.lastCheck = { ok: false, exitIp: '', checkedAt: new Date().toISOString(), error: error.message };
-      save(state);
-      throw error;
+      const lastCheck = {
+        ok: false,
+        exitIp: '',
+        asn: '',
+        country: '',
+        countryCode: '',
+        latencyMs: 0,
+        checkedAt: new Date().toISOString(),
+        error: error.message,
+      };
+      if (persist) {
+        node.lastCheck = lastCheck;
+        save(state);
+        throw error;
+      }
+      return { nodeId, ok: false, error: error.message, lastCheck };
     }
   }
 

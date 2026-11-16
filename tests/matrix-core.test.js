@@ -19,6 +19,7 @@ const abuse = require('../core/abuse-guard');
 const { createWarpPool, endpointList } = require('../core/warp-pool');
 const rotation = require('../core/rotation-coordinator');
 const { createMixedProxy, readRoutingPlane } = require('../lib/local-proxy');
+const leaseBatch = require('../lib/lease-batch');
 
 after(() => {
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
@@ -522,5 +523,65 @@ describe('local-proxy routing plane', () => {
     assert.equal(seen.meta.routingPlane, 'STRICT_CONTROL');
     assert.equal(seen.target.host, 'api.cloudflare.com');
     assert.equal(seen.target.port, 443);
+  });
+});
+
+describe('lease batch planning', () => {
+  const sub = { id: 'sub_1', name: 'Airport A', keyPrefix: 'airport' };
+  const checked = (id, name, countryCode) => ({
+    id,
+    name,
+    subscriptionId: sub.id,
+    lastCheck: { ok: true, exitIp: '203.0.113.7', countryCode, latencyMs: 120 },
+  });
+
+  it('parses slot and port start values', () => {
+    assert.equal(leaseBatch.parseStartPort(''), 0);
+    assert.equal(leaseBatch.parseStartPort('slot-010'), 24010);
+    assert.equal(leaseBatch.parseStartPort('SLOT 7'), 24007);
+    assert.equal(leaseBatch.parseStartPort('24010'), 24010);
+    assert.throws(() => leaseBatch.parseStartPort('slot-999'), (error) => error.code === 'invalid_start_slot');
+    assert.throws(() => leaseBatch.parseStartPort('70000'), (error) => error.code === 'invalid_start_port');
+  });
+
+  it('keeps only probed nodes and skips already leased ones', () => {
+    const state = {
+      leases: [{ id: 'lease_1', key: 'airport/old', nodeId: 'n_old' }],
+      nodes: [
+        checked('n_old', 'old', 'US'),
+        checked('n_ok', 'US-01', 'us'),
+        { id: 'n_new', name: 'US-02', subscriptionId: sub.id, lastCheck: null },
+        { id: 'n_fail', name: 'US-03', subscriptionId: sub.id, lastCheck: { ok: false, exitIp: '', error: 'timeout' } },
+        { id: 'n_other', name: 'other', subscriptionId: 'sub_2', lastCheck: { ok: true, exitIp: '198.51.100.9' } },
+      ],
+    };
+    const plan = leaseBatch.planLeases(state, sub, { onlyPassed: true });
+    assert.equal(plan.specs.length, 1);
+    assert.equal(plan.specs[0].nodeId, 'n_ok');
+    assert.equal(plan.specs[0].country, 'US');
+    assert.equal(plan.specs[0].key, 'airport/us-01');
+    assert.equal(plan.skipped, 2);
+
+    const loose = leaseBatch.planLeases(state, sub, {});
+    assert.equal(loose.specs.length, 3);
+    assert.equal(loose.skipped, 0);
+  });
+
+  it('gives duplicate names unique keys and honours a fixed country', () => {
+    const state = {
+      leases: [],
+      nodes: [
+        checked('a', 'Tokyo', 'JP'),
+        checked('b', 'Tokyo', 'JP'),
+        checked('c', 'Tokyo', 'JP'),
+      ],
+    };
+    const plan = leaseBatch.planLeases(state, sub, { onlyPassed: true, country: 'th' });
+    assert.deepEqual(plan.specs.map((spec) => spec.key), [
+      'airport/tokyo',
+      'airport/tokyo-2',
+      'airport/tokyo-3',
+    ]);
+    assert.deepEqual(plan.specs.map((spec) => spec.country), ['TH', 'TH', 'TH']);
   });
 });

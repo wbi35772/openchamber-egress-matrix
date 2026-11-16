@@ -304,8 +304,8 @@
       <h1>Egress <span>Matrix</span></h1>
       <p class="lede">OpenChamber 的统一出口中枢：250 个固定槽位、双平面路由、<code>/64</code> 污点账本与蓝绿换血。每个槽位一个混合端口（HTTP CONNECT + SOCKS5），由 instabox 与 cloudflare 共同消费；取不到即失败，绝不偷偷直连。</p>
       <div class="badges">
-        <span class="badge green"><span class="dot"></span>v0.3.0</span>
-        <span class="badge"><b>48</b> tests</span>
+        <span class="badge green"><span class="dot"></span>v0.4.0</span>
+        <span class="badge"><b>56</b> tests</span>
         <span class="badge"><b>250</b> matrix slots</span>
         <span class="badge"><b>0</b> runtime deps</span>
         <span class="badge"><b>7</b> panel tabs</span>
@@ -361,7 +361,7 @@
       <a href="#changelog"><svg class="ic"><use href="#i-check"/></svg>变更记录</a>
     </nav>
     <div class="side-meta">
-      <div><span>版本</span><b>0.3.0</b></div>
+      <div><span>版本</span><b>0.4.0</b></div>
       <div><span>Node</span><b>≥ 24</b></div>
       <div><span>OpenChamber</span><b>≥ 2.5</b></div>
       <div><span>槽位</span><b>slot-001…250</b></div>
@@ -612,6 +612,8 @@
             <li><code>vless://</code> WebSocket + TLS</li>
             <li><code>trojan://</code> WebSocket + TLS</li>
             <li><code>socks5://</code> 账号密码可选</li>
+            <li>一键体检整池：出口 IP / 国家 / ASN / 延迟</li>
+            <li>按可用性、国家、来源筛选排序</li>
           </ul>
           <p style="margin-top:8px"><span class="tag ok">稳定</span> 适合固定账号出口。</p>
         </div>
@@ -622,7 +624,7 @@
             <li>按 URI 去重，重复同步只更新归属</li>
             <li>不覆盖手动节点</li>
             <li>可选 autoLease：导入即建租约</li>
-            <li>可批量指定 key 前缀与起始端口</li>
+            <li>批量建租约默认只取体检通过的节点，可指定起始槽位</li>
           </ul>
           <p style="margin-top:8px"><span class="tag info">整池</span> 适合机场/节点集。</p>
         </div>
@@ -663,7 +665,9 @@
           <h3><svg class="ic"><use href="#i-route"/></svg>槽位</h3>
           <ul>
             <li>slot-001…250 列表：端口、平面、状态、出口 IP / <code>/64</code></li>
-            <li>复制 HTTP / SOCKS、探测、换血、隔离、释放</li>
+            <li>三种视图：卡片 / 列表 / 紧凑，切换后本地记住</li>
+            <li>复制 HTTP / SOCKS、探测、换血、隔离 / 解除</li>
+            <li>移除：任意状态（含 QUARANTINED）都可删除租约并关闭监听，二次点击确认</li>
             <li>换血前弹出冻结提示，展示 PRE / POST 事件</li>
           </ul>
         </div>
@@ -671,9 +675,12 @@
           <div class="num">TAB 03</div>
           <h3><svg class="ic"><use href="#i-server"/></svg>节点池</h3>
           <ul>
-            <li>手动添加节点 URI</li>
-            <li>列表标注来源：手动 / 订阅名</li>
-            <li>单节点测试、建租约、删除</li>
+            <li>手动添加节点 URI；行内编辑名称与 URI</li>
+            <li>列表标注来源：手动 / 订阅名；带序号与分页（20 / 50 / 100 / 全部）</li>
+            <li>一键体检整池：出口 IP / 国家 / ASN / 延迟，带进度条；并发可选 8 / 16 / 32 / 64</li>
+            <li>按来源、可用性、国家筛选，按延迟 / 国家 / 名称排序</li>
+            <li>勾选批量：探测、建租约、复制 URI、删除，也可全选筛选结果</li>
+            <li>单节点：编辑、测试、建租约、复制、删除（二次确认）</li>
           </ul>
         </div>
         <div class="card tabcard">
@@ -834,16 +841,18 @@
             <tr><td class="method m-post">POST</td><td><code>/api/nodes</code></td><td>添加静态节点</td><td><code>{name,uri}</code> · 重复 409</td></tr>
             <tr><td class="method m-patch">PATCH</td><td><code>/api/nodes/:id</code></td><td>改名 / 改 URI</td><td><code>{name?,uri?}</code></td></tr>
             <tr><td class="method m-del">DELETE</td><td><code>/api/nodes/:id</code></td><td>删节点并移除其租约</td><td><code>{removedLeases}</code></td></tr>
-            <tr><td class="method m-post">POST</td><td><code>/api/nodes/:id/probe</code></td><td>单节点探测</td><td><code>{ok,exitIp}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/nodes/:id/probe</code></td><td>单节点探测</td><td><code>{ok,exitIp,country,asn,latencyMs}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/nodes/probe-all</code></td><td>后台批量体检节点池</td><td><code>{subscriptionId?,limit?,ttl?,concurrency?}</code> · 202 job</td></tr>
+            <tr><td class="method m-get">GET</td><td><code>/api/nodes/probe-status</code></td><td>体检进度</td><td><code>{running,total,done,passed,failed}</code></td></tr>
             <tr><td class="method m-get">GET</td><td><code>/api/subscriptions</code></td><td>订阅列表</td><td>节点数 / 租约数 / 最近错误</td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/subscriptions</code></td><td>新增并首次同步</td><td><code>{name,url,keyPrefix,autoLease}</code></td></tr>
             <tr><td class="method m-patch">PATCH</td><td><code>/api/subscriptions/:id</code></td><td>改名称 / URL / 前缀</td><td>同名字段可选</td></tr>
             <tr><td class="method m-del">DELETE</td><td><code>/api/subscriptions/:id</code></td><td>删订阅、节点与租约</td><td><code>{removedNodes,removedLeases}</code></td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/subscriptions/:id/sync</code></td><td>重新拉取订阅</td><td><code>{added,updated,errors}</code></td></tr>
-            <tr><td class="method m-post">POST</td><td><code>/api/subscriptions/:id/leases</code></td><td>为订阅节点批量建租约</td><td><code>{keyPrefix,startPort,country}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/subscriptions/:id/leases</code></td><td>为订阅节点批量建租约</td><td><code>{keyPrefix,startPort,country,onlyPassed?}</code></td></tr>
             <tr><td class="method m-get">GET</td><td><code>/api/leases</code></td><td>租约列表</td><td><code>{leases,primary}</code></td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/leases</code></td><td>新建静态租约</td><td><code>{nodeId,key,port?,country?,primary?}</code></td></tr>
-            <tr><td class="method m-post">POST</td><td><code>/api/leases/batch</code></td><td>按订阅批量建租约</td><td><code>{subscriptionId,keyPrefix,startPort?}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>/api/leases/batch</code></td><td>按订阅批量建租约</td><td><code>{subscriptionId,keyPrefix,startPort?,onlyPassed?}</code></td></tr>
             <tr><td class="method m-patch">PATCH</td><td><code>/api/leases/:id</code></td><td>改 key / 端口 / 国家 / 主口</td><td><code>{key?,port?,country?,primary?}</code></td></tr>
             <tr><td class="method m-del">DELETE</td><td><code>/api/leases/:id</code></td><td>删租约并释放端口</td><td><code>{ok}</code></td></tr>
             <tr><td class="method m-post">POST</td><td><code>/api/leases/:id/probe</code></td><td>走本地端口端到端探测</td><td>回写 exitIp / ok</td></tr>
@@ -861,7 +870,8 @@
             <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/probe</code></td><td>槽位端到端探测</td><td>回写 exitIp / <code>/64</code></td></tr>
             <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/rotate</code></td><td>蓝绿换血</td><td>冻结 → 校验 → 恢复</td></tr>
             <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/quarantine</code></td><td>隔离槽位</td><td><code>{lockMs}</code></td></tr>
-            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/release</code></td><td>解除隔离 / 释放</td><td><code>{ok}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/release</code></td><td>解除隔离（QUARANTINED → ACTIVE）</td><td><code>{ok,slot}</code></td></tr>
+            <tr><td class="method m-post">POST</td><td><code>:19880/api/v1/egress/slots/:id/remove</code></td><td>移除槽位：删租约并释放端口</td><td><code>{removed,state}</code></td></tr>
           </tbody>
         </table>
       </div>

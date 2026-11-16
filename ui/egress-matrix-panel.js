@@ -5,6 +5,7 @@ const CHANNEL = 'openchamber.sdk';
 const WIRE = 1;
 const BUS_URL = 'http://127.0.0.1:19880/api/v1/egress';
 const TAB_STORAGE_KEY = 'egress-matrix.tab.v2';
+const SLOT_VIEW_KEY = 'egress-matrix.slot-view.v1';
 
 const ICONS = {
   overview:
@@ -133,11 +134,19 @@ class EgressMatrixPanel extends HTMLElement {
       busy: '',
       toast: null,
       filter: { health: 'ALL', plane: 'ALL', q: '' },
+      nodeFilter: { status: 'ALL', country: 'ALL', subscription: 'ALL', sort: 'name', q: '', page: 1, pageSize: 20 },
+      nodePick: new Set(),
+      probeConcurrency: 16,
+      probeJob: null,
       modal: null,
+      slotView: 'cards',
+      armed: null,
     };
     try {
       const saved = window.localStorage.getItem(TAB_STORAGE_KEY);
       if (saved && TABS.some((tab) => tab.id === saved)) this.state.tab = saved;
+      const savedSlotView = window.localStorage.getItem(SLOT_VIEW_KEY);
+      if (['cards', 'list', 'compact'].includes(savedSlotView)) this.state.slotView = savedSlotView;
     } catch (error) { /* private mode */ }
 
     this.shadowRoot.innerHTML = this.shellTemplate();
@@ -165,6 +174,8 @@ class EgressMatrixPanel extends HTMLElement {
     window.removeEventListener('message', this._onMessage);
     if (this._autoTimer) clearInterval(this._autoTimer);
     this._autoTimer = null;
+    if (this._jobTimer) clearInterval(this._jobTimer);
+    this._jobTimer = null;
   }
 
   shellTemplate() {
@@ -310,18 +321,47 @@ class EgressMatrixPanel extends HTMLElement {
       this.renderView();
     }
     const failures = [];
-    const [config, matrix, events] = await Promise.all([
+    const [config, matrix, events, probe] = await Promise.all([
       this.service('GET', '/api/config').catch((error) => { failures.push(error.message); return null; }),
       this.service('GET', '/api/v1/egress/state').catch((error) => { failures.push(error.message); return null; }),
       this.service('GET', '/api/v1/egress/events?limit=120').catch(() => null),
+      this.service('GET', '/api/nodes/probe-status').catch(() => null),
     ]);
     this.state.config = config || this.state.config;
+    if (this.state.config) {
+      const known = new Set((this.state.config.nodes || []).map((node) => node.id));
+      for (const id of this.state.nodePick) if (!known.has(id)) this.state.nodePick.delete(id);
+    }
     this.state.matrix = matrix || this.state.matrix;
     if (events && Array.isArray(events.events)) this.state.events = events.events.slice().reverse();
+    if (probe && probe.job) {
+      this.state.probeJob = probe.job;
+      if (probe.job.running && !this._jobTimer) this.watchProbeJob(false);
+    }
     this.state.loading = false;
     this.state.error = failures.length && !config ? failures.join('；') : '';
     this.renderChrome();
     this.renderView();
+  }
+
+  watchProbeJob(immediate) {
+    if (this._jobTimer) clearInterval(this._jobTimer);
+    const tick = async () => {
+      if (!this._connected) return;
+      try {
+        const data = await this.service('GET', '/api/nodes/probe-status', undefined, 20000);
+        this.state.probeJob = data.job || null;
+        this.renderChrome();
+        this.renderView();
+        if (!data.job || !data.job.running) {
+          clearInterval(this._jobTimer);
+          this._jobTimer = null;
+          await this.refresh({ quiet: true });
+        }
+      } catch (error) { /* next tick retries */ }
+    };
+    this._jobTimer = setInterval(tick, 1500);
+    if (immediate !== false) void tick();
   }
 
   act(label, task) {
@@ -601,9 +641,15 @@ class EgressMatrixPanel extends HTMLElement {
     });
   }
 
+  isArmed(act, id) {
+    const armed = this.state.armed;
+    return Boolean(armed && armed.act === act && armed.id === id && Date.now() - armed.at < 6000);
+  }
+
   viewSlots() {
     const all = this.slots();
     const rows = this.filteredSlots();
+    const view = this.state.slotView;
     return [
       '<section class="stack">',
       '<div class="toolbar card">',
@@ -620,17 +666,41 @@ class EgressMatrixPanel extends HTMLElement {
       }).join(''),
       '</select></div>',
       '<div class="field inline grow"><label>搜索</label><input data-field="slot-search" data-filter="q" value="' + esc(this.state.filter.q) + '" placeholder="slot-001 / key / 出口 IP" /></div>',
+      '<div class="seg" role="group" aria-label="显示样式">',
+      [['cards', '卡片'], ['list', '列表'], ['compact', '紧凑']].map((pair) => {
+        return '<button class="seg-btn' + (view === pair[0] ? ' active' : '') + '" data-act="slot-view" data-view="' + pair[0] + '">' + pair[1] + '</button>';
+      }).join(''),
+      '</div>',
       '<div class="toolbar-meta">' + rows.length + ' / ' + all.length + ' 条</div>',
       '</div>',
-      rows.length ? '<div class="slot-grid">' + rows.map((slot) => this.slotCard(slot)).join('') + '</div>'
+      rows.length ? this.slotBody(rows, view)
         : emptyText(all.length ? '没有符合筛选条件的槽位' : '还没有槽位。到节点池建租约，或在订阅页批量建租约。'),
       '</section>',
     ].join('');
   }
 
+  slotBody(rows, view) {
+    if (view === 'list') return this.slotList(rows);
+    if (view === 'compact') return this.slotCompact(rows);
+    return '<div class="slot-grid">' + rows.map((slot) => this.slotCard(slot)).join('') + '</div>';
+  }
+
+  slotActions(slot, dense) {
+    const busy = Boolean(this.state.busy);
+    const armed = this.isArmed('slot-remove', slot.matrixSlotId);
+    const cls = 'btn ghost small' + (dense ? ' icon' : '');
+    return [
+      '<button class="' + cls + '" data-act="slot-probe" data-slot="' + esc(slot.matrixSlotId) + '" title="探测出口"' + (busy ? ' disabled' : '') + '>' + ICONS.play + (dense ? '' : '探测') + '</button>',
+      '<button class="' + cls + '" data-act="slot-rotate" data-slot="' + esc(slot.matrixSlotId) + '" title="蓝绿换血"' + (busy ? ' disabled' : '') + '>' + (dense ? ICONS.refresh : '换血') + '</button>',
+      slot.healthState === 'QUARANTINED'
+        ? '<button class="' + cls + '" data-act="slot-release" data-slot="' + esc(slot.matrixSlotId) + '" title="解除隔离"' + (busy ? ' disabled' : '') + '>' + ICONS.shield + (dense ? '' : '解除') + '</button>'
+        : '<button class="' + cls + ' danger" data-act="slot-quarantine" data-slot="' + esc(slot.matrixSlotId) + '" title="隔离槽位"' + (busy ? ' disabled' : '') + '>' + ICONS.shield + (dense ? '' : '隔离') + '</button>',
+      '<button class="' + cls + ' danger' + (armed ? ' armed' : '') + '" data-act="slot-remove" data-slot="' + esc(slot.matrixSlotId) + '" title="删除租约并移除槽位"' + (busy ? ' disabled' : '') + '>' + ICONS.trash + (dense ? '' : (armed ? '确认移除' : '移除')) + '</button>',
+    ].join('');
+  }
+
   slotCard(slot) {
     const fingerprint = slot.egressFingerprint || {};
-    const busy = Boolean(this.state.busy);
     const cooldown = Number(slot.cooldownUntil) > Date.now() ? ' · 至 ' + fmtTime(slot.cooldownUntil) : '';
     return [
       '<article class="slot card tone-' + (HEALTH_TONE[slot.healthState] || 'muted') + '">',
@@ -647,13 +717,7 @@ class EgressMatrixPanel extends HTMLElement {
       '<div><dt>leaseId</dt><dd title="' + esc(fingerprint.leaseId || '') + '">' + esc(shortId(fingerprint.leaseId, 16)) + '</dd></div>',
       '</dl>',
       slot.lastError ? '<p class="note ' + (slot.healthState === 'QUARANTINED' ? 'danger' : 'warn') + '">' + esc(slot.lastError) + cooldown + '</p>' : '',
-      '<footer>',
-      '<button class="btn ghost small" data-act="slot-probe" data-slot="' + esc(slot.matrixSlotId) + '"' + (busy ? ' disabled' : '') + '>' + ICONS.play + '探测</button>',
-      '<button class="btn ghost small" data-act="slot-rotate" data-slot="' + esc(slot.matrixSlotId) + '"' + (busy ? ' disabled' : '') + '>换血</button>',
-      slot.healthState === 'QUARANTINED'
-        ? '<button class="btn ghost small" data-act="slot-release" data-slot="' + esc(slot.matrixSlotId) + '"' + (busy ? ' disabled' : '') + '>' + ICONS.shield + '解除</button>'
-        : '<button class="btn ghost small danger" data-act="slot-quarantine" data-slot="' + esc(slot.matrixSlotId) + '"' + (busy ? ' disabled' : '') + '>' + ICONS.shield + '隔离</button>',
-      '</footer>',
+      '<footer>' + this.slotActions(slot, false) + '</footer>',
       '<details class="slot-json"><summary>契约记录</summary><pre>' + esc(JSON.stringify({
         matrixSlotId: slot.matrixSlotId,
         egressPort: slot.egressPort,
@@ -668,8 +732,199 @@ class EgressMatrixPanel extends HTMLElement {
     ].join('');
   }
 
-  viewNodes() {
+  slotList(rows) {
+    return [
+      '<div class="card slot-table-card">',
+      '<div class="slot-tr slot-tr-head">',
+      '<span>槽位</span><span>端口</span><span>健康</span><span>平面</span><span>出口 IP</span><span>国家 / ASN</span><span>租约</span><span class="right">操作</span>',
+      '</div>',
+      rows.map((slot) => {
+        const fp = slot.egressFingerprint || {};
+        return [
+          '<div class="slot-tr">',
+          '<div class="cell-stack"><strong class="mono">' + esc(slot.matrixSlotId) + '</strong><span class="muted nowrap" title="' + esc(slot.key || '') + '">' + esc(slot.key || '—') + '</span></div>',
+          '<button class="port" data-act="copy" data-copy="127.0.0.1:' + esc(slot.egressPort) + '" data-label="端口">' + esc(slot.egressPort) + '</button>',
+          '<div>' + healthBadge(slot.healthState) + '</div>',
+          '<div>' + planeBadge(slot.routingPlane) + '</div>',
+          '<span class="mono nowrap">' + esc(fp.exitIp || '待探测') + '</span>',
+          '<span class="muted nowrap">' + esc(slot.country || '—') + (fp.asn ? ' · ' + esc(String(fp.asn).split(' ')[0]) : '') + '</span>',
+          '<span class="mono muted nowrap" title="' + esc(fp.leaseId || '') + '">' + esc(shortId(fp.leaseId, 14) || '—') + '</span>',
+          '<div class="row-actions">' + this.slotActions(slot, true) + '</div>',
+          '</div>',
+        ].join('');
+      }).join(''),
+      '</div>',
+    ].join('');
+  }
+
+  slotCompact(rows) {
+    return [
+      '<div class="card slot-compact">',
+      rows.map((slot) => {
+        const fp = slot.egressFingerprint || {};
+        return [
+          '<div class="compact-row tone-' + (HEALTH_TONE[slot.healthState] || 'muted') + '">',
+          '<span class="compact-dot"></span>',
+          '<strong class="mono">' + esc(slot.matrixSlotId) + '</strong>',
+          '<button class="port" data-act="copy" data-copy="127.0.0.1:' + esc(slot.egressPort) + '" data-label="端口">' + esc(slot.egressPort) + '</button>',
+          healthBadge(slot.healthState),
+          '<span class="muted compact-key" title="' + esc(slot.key || '') + '">' + esc(slot.key || '—') + '</span>',
+          '<span class="mono muted nowrap">' + esc(fp.exitIp || '待探测') + '</span>',
+          '<span class="badge tone-muted">' + esc(slot.country || '—') + '</span>',
+          '<span class="row-actions">' + this.slotActions(slot, true) + '</span>',
+          '</div>',
+        ].join('');
+      }).join(''),
+      '</div>',
+    ].join('');
+  }
+
+  nodeCheckState(node) {
+    const check = node && node.lastCheck;
+    if (!check) return 'NEW';
+    return check.ok ? 'PASS' : 'FAIL';
+  }
+
+  nodeLatency(node) {
+    const check = node && node.lastCheck;
+    const ms = check && check.ok ? Number(check.latencyMs) : NaN;
+    return Number.isFinite(ms) && ms > 0 ? ms : Infinity;
+  }
+
+  nodeCountries(nodes) {
+    const codes = new Set();
+    for (const node of nodes) {
+      const check = node.lastCheck;
+      const code = check && check.ok ? String(check.countryCode || '').toUpperCase() : '';
+      if (code) codes.add(code);
+    }
+    return [...codes].sort();
+  }
+
+  filteredNodes() {
     const nodes = this.state.config.nodes || [];
+    const filter = this.state.nodeFilter;
+    const query = filter.q.trim().toLowerCase();
+    const rows = nodes.filter((node) => {
+      const state = this.nodeCheckState(node);
+      if (filter.status !== 'ALL' && state !== filter.status) return false;
+      if (filter.subscription !== 'ALL' && (node.subscriptionId || '') !== filter.subscription) return false;
+      const check = node.lastCheck || {};
+      const code = check.ok ? String(check.countryCode || '').toUpperCase() : '';
+      if (filter.country !== 'ALL' && code !== filter.country) return false;
+      if (!query) return true;
+      return [node.name, node.id, check.exitIp, check.countryCode, check.asn, check.country, node.node && node.node.server]
+        .filter(Boolean).join(' ').toLowerCase().includes(query);
+    });
+    rows.sort((a, b) => {
+      if (filter.sort === 'latency') {
+        const left = this.nodeLatency(a);
+        const right = this.nodeLatency(b);
+        if (left !== right) {
+          if (!Number.isFinite(left)) return 1;
+          if (!Number.isFinite(right)) return -1;
+          return left - right;
+        }
+      }
+      if (filter.sort === 'country') {
+        const diff = String((a.lastCheck && a.lastCheck.countryCode) || 'ZZ')
+          .localeCompare(String((b.lastCheck && b.lastCheck.countryCode) || 'ZZ'));
+        if (diff) return diff;
+      }
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    return rows;
+  }
+
+  latencyBadge(check) {
+    if (!check || !check.ok) return '';
+    const ms = Number(check.latencyMs);
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const tone = ms < 400 ? 'active' : ms < 1200 ? 'cooldown' : 'quarantine';
+    return '<span class="badge tone-' + tone + '">' + Math.round(ms) + ' ms</span>';
+  }
+
+  nodeById(id) {
+    return ((this.state.config && this.state.config.nodes) || []).find((node) => node.id === id) || null;
+  }
+
+  nodeTitle(node) {
+    if (!node) return '';
+    if (node.uri) return node.uri;
+    const info = node.node || {};
+    return (info.protocol || '?') + '://' + (info.server || '?') + ':' + (info.port || '?');
+  }
+
+  nodePageRows(rows) {
+    const size = Number(this.state.nodeFilter.pageSize) || 0;
+    const pages = size > 0 ? Math.max(1, Math.ceil(rows.length / size)) : 1;
+    const page = Math.min(Math.max(1, Number(this.state.nodeFilter.page) || 1), pages);
+    const start = size > 0 ? (page - 1) * size : 0;
+    return { page, pages, start, size, items: size > 0 ? rows.slice(start, start + size) : rows };
+  }
+
+  nodeRow(node, index) {
+    const check = node.lastCheck || null;
+    const code = check && check.ok ? String(check.countryCode || '').toUpperCase() : '';
+    const picked = this.state.nodePick.has(node.id);
+    const armed = this.isArmed('node-delete', node.id);
+    const busy = Boolean(this.state.busy);
+    return [
+      '<div class="node-tr' + (picked ? ' picked' : '') + '">',
+      '<label class="pick"><input type="checkbox" data-node-pick="' + esc(node.id) + '"' + (picked ? ' checked' : '') + ' /></label>',
+      '<span class="col-idx">' + index + '</span>',
+      '<div class="node-main">',
+      '<div class="node-name"><strong>' + esc(node.name) + '</strong>' + (node.subscriptionId ? '<span class="badge tone-muted">订阅</span>' : '<span class="badge tone-muted">手动</span>') + '</div>',
+      '<span class="mono node-uri" title="' + esc(this.nodeTitle(node)) + '">' + esc(this.nodeTitle(node)) + '</span>',
+      '</div>',
+      '<div class="row-meta">',
+      check ? (check.ok ? '<span class="badge tone-active">出口 ' + esc(check.exitIp || '?') + '</span>' : '<span class="badge tone-quarantine" title="' + esc(check.error || '') + '">探测失败</span>') : '<span class="badge tone-muted">未探测</span>',
+      this.latencyBadge(check),
+      code ? '<span class="badge tone-muted" title="' + esc(check.country || code) + '">' + esc(code) + '</span>' : '',
+      check && check.ok && check.asn ? '<span class="badge tone-muted" title="' + esc(check.asn) + '">' + esc(String(check.asn).split(' ')[0]) + '</span>' : '',
+      check && check.checkedAt ? '<span class="badge tone-muted">' + esc(ago(Date.parse(check.checkedAt))) + '</span>' : '',
+      '</div>',
+      '<div class="row-actions">',
+      '<button class="btn ghost small" data-act="node-edit" data-node="' + esc(node.id) + '"' + (busy ? ' disabled' : '') + '>编辑</button>',
+      '<button class="btn ghost small" data-act="node-probe" data-node="' + esc(node.id) + '"' + (busy ? ' disabled' : '') + '>' + ICONS.play + '探测</button>',
+      '<button class="btn ghost small" data-act="node-lease" data-node="' + esc(node.id) + '" data-name="' + esc(node.name) + '"' + (busy ? ' disabled' : '') + '>建租约</button>',
+      '<button class="btn ghost small" data-act="node-copy" data-node="' + esc(node.id) + '">复制</button>',
+      '<button class="btn ghost small danger' + (armed ? ' armed' : '') + '" data-act="node-delete" data-node="' + esc(node.id) + '"' + (busy ? ' disabled' : '') + '>' + ICONS.trash + (armed ? '确认删除' : '') + '</button>',
+      '</div>',
+      '</div>',
+    ].join('');
+  }
+
+  nodePager(total, page) {
+    const filter = this.state.nodeFilter;
+    const sizes = [[20, '20'], [50, '50'], [100, '100'], [0, '全部']];
+    return [
+      '<div class="pager">',
+      '<span class="muted">共 ' + total + ' 条 · 第 ' + page.page + ' / ' + page.pages + ' 页</span>',
+      '<label class="field inline"><span>每页</span><select data-node-page-size>',
+      sizes.map((pair) => '<option value="' + pair[0] + '"' + (Number(filter.pageSize) === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>').join(''),
+      '</select></label>',
+      '<button class="btn ghost small" data-act="nodes-page" data-page="' + (page.page - 1) + '"' + (page.page <= 1 ? ' disabled' : '') + '>上一页</button>',
+      '<button class="btn ghost small" data-act="nodes-page" data-page="' + (page.page + 1) + '"' + (page.page >= page.pages ? ' disabled' : '') + '>下一页</button>',
+      '</div>',
+    ].join('');
+  }
+
+  viewNodes() {
+    const all = this.state.config.nodes || [];
+    const rows = this.filteredNodes();
+    const subs = this.state.config.subscriptions || [];
+    const job = this.state.probeJob;
+    const running = Boolean(job && job.running);
+    const stats = { PASS: 0, FAIL: 0, NEW: 0 };
+    for (const node of all) stats[this.nodeCheckState(node)] += 1;
+    const countries = this.nodeCountries(all);
+    const filter = this.state.nodeFilter;
+    const pct = job && job.total ? Math.round((job.done / job.total) * 100) : 0;
+    const page = this.nodePageRows(rows);
+    const pageIds = page.items.map((node) => node.id);
+    const allPagePicked = pageIds.length > 0 && pageIds.every((id) => this.state.nodePick.has(id));
+    const picked = this.state.nodePick.size;
     return [
       '<section class="stack">',
       '<div class="card">',
@@ -680,29 +935,65 @@ class EgressMatrixPanel extends HTMLElement {
       '<div class="field actions"><button class="btn primary" type="submit">添加节点</button></div>',
       '</form>',
       '</div>',
+      '<div class="toolbar card">',
+      '<div class="field inline"><label>订阅</label><select data-node-filter="subscription">',
+      '<option value="ALL"' + (filter.subscription === 'ALL' ? ' selected' : '') + '>全部</option>',
+      subs.map((sub) => '<option value="' + esc(sub.id) + '"' + (filter.subscription === sub.id ? ' selected' : '') + '>' + esc(sub.name) + '</option>').join(''),
+      '</select></div>',
+      '<div class="field inline"><label>体检</label><select data-node-filter="status">',
+      [['ALL', '全部'], ['PASS', '通过'], ['FAIL', '失败'], ['NEW', '未测']].map((pair) => {
+        return '<option value="' + pair[0] + '"' + (filter.status === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
+      }).join(''),
+      '</select></div>',
+      '<div class="field inline"><label>国家</label><select data-node-filter="country">',
+      '<option value="ALL"' + (filter.country === 'ALL' ? ' selected' : '') + '>全部</option>',
+      countries.map((code) => '<option value="' + esc(code) + '"' + (filter.country === code ? ' selected' : '') + '>' + esc(code) + '</option>').join(''),
+      '</select></div>',
+      '<div class="field inline"><label>排序</label><select data-node-filter="sort">',
+      [['name', '名称'], ['latency', '延迟'], ['country', '国家']].map((pair) => {
+        return '<option value="' + pair[0] + '"' + (filter.sort === pair[0] ? ' selected' : '') + '>' + pair[1] + '</option>';
+      }).join(''),
+      '</select></div>',
+      '<div class="field inline grow"><label>搜索</label><input data-field="node-search" data-node-filter="q" value="' + esc(filter.q) + '" placeholder="名称 / 出口 IP / ASN" /></div>',
+      '<div class="toolbar-meta">' + rows.length + ' / ' + all.length + ' 条</div>',
+      '<label class="field inline"><span>并发</span><select data-probe-concurrency>',
+      [8, 16, 32, 64].map((value) => '<option value="' + value + '"' + (Number(this.state.probeConcurrency) === value ? ' selected' : '') + '>' + value + '</option>').join(''),
+      '</select></label>',
+      '<button class="btn primary small" data-act="nodes-probe-all"' + (running || this.state.busy ? ' disabled' : '') + '>' + ICONS.play + (running ? '体检中' : '测全池') + '</button>',
+      '</div>',
+      picked ? [
+        '<div class="bulkbar card">',
+        '<strong>已选 ' + picked + ' 个节点</strong>',
+        '<button class="btn ghost small" data-act="nodes-probe"' + (this.state.busy ? ' disabled' : '') + '>' + ICONS.play + '探测所选</button>',
+        '<button class="btn ghost small" data-act="nodes-lease"' + (this.state.busy ? ' disabled' : '') + '>建租约</button>',
+        '<button class="btn ghost small" data-act="nodes-copy">复制 URI</button>',
+        '<button class="btn ghost small danger' + (this.isArmed('nodes-delete', 'pick') ? ' armed' : '') + '" data-act="nodes-delete"' + (this.state.busy ? ' disabled' : '') + '>' + ICONS.trash + (this.isArmed('nodes-delete', 'pick') ? '确认删除 ' + picked + ' 个' : '删除所选') + '</button>',
+        '<button class="btn ghost small" data-act="nodes-pick-filtered">全选筛选结果</button>',
+        '<button class="btn ghost small" data-act="nodes-clear">清除选择</button>',
+        '</div>',
+      ].join('') : '',
+      running ? [
+        '<div class="probe-strip card">',
+        '<div class="probe-head"><strong>节点池体检 ' + esc(job.done) + ' / ' + esc(job.total || '?') + '</strong>',
+        '<span class="muted">通过 ' + esc(job.passed) + ' · 失败 ' + esc(job.failed) + '</span></div>',
+        '<div class="bar-track"><i class="tone-active" style="width:' + pct + '%"></i></div>',
+        '</div>',
+      ].join('') : '',
       '<div class="card">',
-      '<div class="card-head"><h2>节点池</h2><span class="muted">' + nodes.length + ' 个节点</span></div>',
-      nodes.length ? '<div class="list">' + nodes.map((node) => {
-        const info = node.node || {};
-        const check = node.lastCheck || null;
-        return [
-          '<div class="row">',
-          '<div class="row-main">',
-          '<strong>' + esc(node.name) + '</strong>',
-          '<span class="mono">' + esc((info.protocol || '?') + '://' + (info.server || '?') + ':' + (info.port || '?')) + '</span>',
-          '</div>',
-          '<div class="row-meta">',
-          node.subscriptionId ? '<span class="badge tone-muted">订阅</span>' : '<span class="badge tone-muted">手动</span>',
-          check ? (check.ok ? '<span class="badge tone-active">出口 ' + esc(check.exitIp || '?') + '</span>' : '<span class="badge tone-quarantine">探测失败</span>') : '<span class="badge tone-muted">未探测</span>',
-          '</div>',
-          '<div class="row-actions">',
-          '<button class="btn ghost small" data-act="node-probe" data-node="' + esc(node.id) + '">' + ICONS.play + '探测</button>',
-          '<button class="btn ghost small" data-act="node-lease" data-node="' + esc(node.id) + '" data-name="' + esc(node.name) + '">建租约</button>',
-          '<button class="btn ghost small danger" data-act="node-delete" data-node="' + esc(node.id) + '">' + ICONS.trash + '</button>',
-          '</div>',
-          '</div>',
-        ].join('');
-      }).join('') + '</div>' : emptyText('节点池为空。添加一个节点，或从订阅导入。'),
+      '<div class="card-head"><h2>节点池</h2><span class="muted">通过 ' + stats.PASS + ' · 失败 ' + stats.FAIL + ' · 未测 ' + stats.NEW + '</span></div>',
+      rows.length ? [
+        '<div class="node-table">',
+        '<div class="node-tr node-tr-head">',
+        '<label class="pick"><input type="checkbox" data-node-all="1"' + (allPagePicked ? ' checked' : '') + ' /></label>',
+        '<span class="col-idx">#</span>',
+        '<span>节点</span>',
+        '<span>状态</span>',
+        '<span class="right">操作</span>',
+        '</div>',
+        page.items.map((node, index) => this.nodeRow(node, page.start + index + 1)).join(''),
+        '</div>',
+        this.nodePager(rows.length, page),
+      ].join('') : emptyText(all.length ? '没有符合筛选条件的节点' : '节点池为空。添加一个节点，或从订阅导入。'),
       '</div>',
       '</section>',
     ].join('');
@@ -723,13 +1014,15 @@ class EgressMatrixPanel extends HTMLElement {
       '</form>',
       '</div>',
       '<div class="card">',
-      '<div class="card-head"><h2>批量建租约</h2><span class="muted">按订阅节点顺序分配槽位</span></div>',
+      '<div class="card-head"><h2>批量建租约</h2><span class="muted">默认只取体检通过的节点，可用起始槽位固定端口</span></div>',
       '<form class="form-grid" data-form="sub-batch">',
       '<label class="field"><span>订阅</span><select name="subscriptionId" data-field="batch-sub">',
       subs.length ? subs.map((sub) => '<option value="' + esc(sub.id) + '">' + esc(sub.name) + '（' + esc(sub.nodeCount) + ' 节点）</option>').join('') : '<option value="">先导入订阅</option>',
       '</select></label>',
       '<label class="field"><span>Key 前缀（可选）</span><input name="keyPrefix" data-field="batch-prefix" placeholder="留空用节点名" /></label>',
-      '<label class="field"><span>国家（可选）</span><input name="country" data-field="batch-country" placeholder="TH" /></label>',
+      '<label class="field"><span>国家（可选）</span><input name="country" data-field="batch-country" placeholder="留空用体检结果" /></label>',
+      '<label class="field"><span>起始槽位（可选）</span><input name="startPort" data-field="batch-start" placeholder="slot-010 或 24010" /></label>',
+      '<label class="check"><input type="checkbox" name="onlyPassed" value="1" data-field="batch-only-passed" checked /> <span>只取体检通过的节点</span></label>',
       '<div class="field actions"><button class="btn primary" type="submit"' + (subs.length ? '' : ' disabled') + '>批量建租约</button></div>',
       '</form>',
       '</div>',
@@ -946,6 +1239,28 @@ class EgressMatrixPanel extends HTMLElement {
         '</div>',
       ].join('');
     }
+    if (modal.type === 'node-edit') {
+      const node = this.nodeById(modal.id);
+      if (!node) {
+        wrap.hidden = true;
+        wrap.innerHTML = '';
+        return;
+      }
+      wrap.innerHTML = [
+        '<div class="modal">',
+        '<div class="card-head"><h2>编辑节点</h2><button class="btn ghost small" data-act="modal-close">关闭</button></div>',
+        '<form data-form="node-edit" data-id="' + esc(node.id) + '">',
+        '<label class="field"><span>名称</span><input name="name" data-field="edit-node-name" value="' + esc(node.name) + '" /></label>',
+        '<label class="field"><span>节点 URI</span><textarea name="uri" rows="4" data-field="edit-node-uri" placeholder="vless://...">' + esc(this.nodeTitle(node)) + '</textarea></label>',
+        '<p class="note">保存后会立即重建该节点对应的监听，出口身份可能变化。</p>',
+        '<div class="modal-actions">',
+        '<button class="btn ghost" type="button" data-act="modal-close">取消</button>',
+        '<button class="btn primary" type="submit">保存</button>',
+        '</div>',
+        '</form>',
+        '</div>',
+      ].join('');
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -989,19 +1304,126 @@ class EgressMatrixPanel extends HTMLElement {
       void this.act('解除隔离 ' + id, () => this.service('POST', '/api/v1/egress/slots/' + encodeURIComponent(id) + '/release', {}));
       return;
     }
+    if (act === 'slot-remove') {
+      const id = target.dataset.slot;
+      if (!this.isArmed('slot-remove', id)) {
+        this.state.armed = { act: 'slot-remove', id, at: Date.now() };
+        this.renderView();
+        this.toast('再点一次「确认移除」会删除 ' + id + ' 的租约并关闭监听', 'info');
+        return;
+      }
+      this.state.armed = null;
+      void this.act('移除槽位 ' + id, () => this.service('POST', '/api/v1/egress/slots/' + encodeURIComponent(id) + '/remove', {}, 120000));
+      return;
+    }
+    if (act === 'slot-view') {
+      this.state.slotView = target.dataset.view;
+      this.state.armed = null;
+      try { window.localStorage.setItem(SLOT_VIEW_KEY, this.state.slotView); } catch (error) { /* ignore */ }
+      this.renderView();
+      return;
+    }
     if (act === 'slot-rotate') {
       this.state.modal = { type: 'rotate', matrixSlotId: target.dataset.slot };
       this.renderView();
       return;
     }
+    if (act === 'nodes-probe-all') {
+      void this.act('节点池体检', () => this.service('POST', '/api/nodes/probe-all', { concurrency: this.state.probeConcurrency }, 20000));
+      return;
+    }
     if (act === 'node-probe') {
       const id = target.dataset.node;
-      void this.act('探测节点', () => this.service('POST', '/api/nodes/' + encodeURIComponent(id) + '/probe', {}, 60000));
+      void this.act('探测节点', () => this.service('POST', '/api/nodes/' + encodeURIComponent(id) + '/probe', { deep: true }, 90000));
+      return;
+    }
+    if (act === 'node-edit') {
+      this.state.modal = { type: 'node-edit', id: target.dataset.node };
+      this.renderView();
+      return;
+    }
+    if (act === 'node-copy') {
+      const node = this.nodeById(target.dataset.node);
+      if (node) this.copy(this.nodeTitle(node), '节点 URI');
       return;
     }
     if (act === 'node-delete') {
       const id = target.dataset.node;
+      if (!this.isArmed('node-delete', id)) {
+        this.state.armed = { act: 'node-delete', id, at: Date.now() };
+        this.renderView();
+        this.toast('再点一次「确认删除」会移除该节点及其租约', 'info');
+        return;
+      }
+      this.state.armed = null;
       void this.act('删除节点', () => this.service('DELETE', '/api/nodes/' + encodeURIComponent(id)));
+      return;
+    }
+    if (act === 'nodes-page') {
+      this.state.nodeFilter.page = Math.max(1, Number(target.dataset.page) || 1);
+      this.renderView();
+      return;
+    }
+    if (act === 'nodes-clear') {
+      this.state.nodePick.clear();
+      this.state.armed = null;
+      this.renderView();
+      return;
+    }
+    if (act === 'nodes-pick-filtered') {
+      for (const node of this.filteredNodes()) this.state.nodePick.add(node.id);
+      this.renderView();
+      return;
+    }
+    if (act === 'nodes-probe') {
+      const ids = Array.from(this.state.nodePick);
+      if (!ids.length) return;
+      void this.act('探测所选 ' + ids.length + ' 个节点', async () => {
+        for (const id of ids) {
+          await this.service('POST', '/api/nodes/' + encodeURIComponent(id) + '/probe', { deep: true }, 90000);
+        }
+      });
+      return;
+    }
+    if (act === 'nodes-lease') {
+      const ids = Array.from(this.state.nodePick);
+      if (!ids.length) return;
+      void this.act('为所选 ' + ids.length + ' 个节点建租约', async () => {
+        for (const id of ids) {
+          const node = this.nodeById(id);
+          await this.service('POST', '/api/leases', {
+            nodeId: id,
+            key: 'node/' + ((node && node.name) || id),
+            primary: false,
+          });
+        }
+      });
+      return;
+    }
+    if (act === 'nodes-copy') {
+      const text = Array.from(this.state.nodePick)
+        .map((id) => this.nodeTitle(this.nodeById(id)))
+        .filter(Boolean)
+        .join('\n');
+      if (text) this.copy(text, '节点 URI');
+      return;
+    }
+    if (act === 'nodes-delete') {
+      const ids = Array.from(this.state.nodePick);
+      if (!ids.length) return;
+      if (!this.isArmed('nodes-delete', 'pick')) {
+        this.state.armed = { act: 'nodes-delete', id: 'pick', at: Date.now() };
+        this.renderView();
+        this.toast('再点一次「确认删除 ' + ids.length + ' 个」会删除节点及其租约', 'info');
+        return;
+      }
+      this.state.armed = null;
+      this.state.nodePick.clear();
+      void this.act('删除所选 ' + ids.length + ' 个节点', async () => {
+        for (const id of ids) {
+          await this.service('DELETE', '/api/nodes/' + encodeURIComponent(id));
+        }
+      });
       return;
     }
     if (act === 'node-lease') {
@@ -1027,10 +1449,20 @@ class EgressMatrixPanel extends HTMLElement {
       const id = target.dataset.sub;
       const form = this.shadowRoot.querySelector('form[data-form="sub-batch"]');
       const country = form && form.country ? form.country.value : '';
+      const onlyPassed = form && form.onlyPassed ? form.onlyPassed.checked : true;
+      const startPort = form && form.startPort ? form.startPort.value.trim() : '';
+      const keyPrefix = form && form.keyPrefix ? form.keyPrefix.value.trim() : '';
       void this.act('批量建租约', () => this.service('POST', '/api/leases/batch', {
         subscriptionId: id,
+        keyPrefix,
         country,
-      }, 90000));
+        startPort,
+        onlyPassed,
+      }, 120000)).then((result) => {
+        if (result && Number(result.skipped) > 0) {
+          this.toast('已建 ' + result.created + ' 条，跳过未通过 ' + result.skipped + ' 条', 'info');
+        }
+      });
       return;
     }
     if (act === 'pg-sync') {
@@ -1063,6 +1495,19 @@ class EgressMatrixPanel extends HTMLElement {
       })).then(() => form.reset());
       return;
     }
+    if (kind === 'node-edit') {
+      const id = form.dataset.id;
+      const name = String(data.get('name') || '').trim();
+      const uri = String(data.get('uri') || '').trim();
+      if (!uri) {
+        this.toast('节点 URI 不能为空', 'error');
+        return;
+      }
+      this.state.modal = null;
+      this.renderView();
+      void this.act('保存节点', () => this.service('PATCH', '/api/nodes/' + encodeURIComponent(id), { name, uri }));
+      return;
+    }
     if (kind === 'sub-add') {
       void this.act('导入订阅', () => this.service('POST', '/api/subscriptions', {
         url: String(data.get('url') || '').trim(),
@@ -1077,7 +1522,13 @@ class EgressMatrixPanel extends HTMLElement {
         subscriptionId: String(data.get('subscriptionId') || ''),
         keyPrefix: String(data.get('keyPrefix') || '').trim(),
         country: String(data.get('country') || '').trim(),
-      }, 90000));
+        startPort: String(data.get('startPort') || '').trim(),
+        onlyPassed: data.get('onlyPassed') === '1',
+      }, 120000)).then((result) => {
+        if (result && Number(result.skipped) > 0) {
+          this.toast('已建 ' + result.created + ' 条，跳过未通过 ' + result.skipped + ' 条', 'info');
+        }
+      });
       return;
     }
     if (kind === 'pg-save') {
@@ -1150,6 +1601,39 @@ class EgressMatrixPanel extends HTMLElement {
   onInput(event) {
     const target = event.target;
     if (!target || !target.dataset) return;
+    const pickId = target.dataset.nodePick;
+    if (pickId) {
+      if (target.checked) this.state.nodePick.add(pickId);
+      else this.state.nodePick.delete(pickId);
+      this.renderView();
+      return;
+    }
+    if (target.dataset.nodeAll) {
+      for (const node of this.nodePageRows(this.filteredNodes()).items) {
+        if (target.checked) this.state.nodePick.add(node.id);
+        else this.state.nodePick.delete(node.id);
+      }
+      this.renderView();
+      return;
+    }
+    if (target.dataset.nodePageSize !== undefined) {
+      this.state.nodeFilter.pageSize = Number(target.value);
+      this.state.nodeFilter.page = 1;
+      this.renderView();
+      return;
+    }
+    if (target.dataset.probeConcurrency !== undefined) {
+      this.state.probeConcurrency = Number(target.value) || 16;
+      this.renderView();
+      return;
+    }
+    const nodeFilter = target.dataset.nodeFilter;
+    if (nodeFilter) {
+      this.state.nodeFilter[nodeFilter] = target.value;
+      this.state.nodeFilter.page = 1;
+      this.renderView();
+      return;
+    }
     const filter = target.dataset.filter;
     if (!filter) return;
     if (filter === 'q') {
@@ -1362,6 +1846,49 @@ class EgressMatrixPanel extends HTMLElement {
       .toolbar.card { padding: 12px 14px; }
       .toolbar-meta { margin-left: auto; color: var(--oc-text-muted); font-size: 11px; font-family: var(--oc-font-mono); }
 
+      .seg { display: inline-flex; border: 1px solid var(--oc-border); border-radius: 8px; overflow: hidden; background: var(--oc-bg-elevated); }
+      .seg-btn { border: 0; background: transparent; color: var(--oc-text-muted); padding: 6px 11px; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
+      .seg-btn + .seg-btn { border-left: 1px solid var(--oc-border); }
+      .seg-btn:hover { background: #ffffff0a; color: var(--oc-text-primary); }
+      .seg-btn.active { background: var(--oc-accent); color: #fff; }
+
+      .slot-table-card { padding: 0; overflow-x: auto; }
+      .slot-tr {
+        display: grid; gap: 10px; align-items: center; padding: 9px 14px;
+        grid-template-columns: 150px 64px 84px 108px minmax(118px, 1fr) minmax(96px, .85fr) 108px 168px;
+        border-bottom: 1px solid #ffffff0a; min-width: 900px;
+      }
+      .slot-tr:last-child { border-bottom: 0; }
+      .slot-tr-head {
+        position: sticky; top: 0; z-index: 1;
+        background: var(--oc-bg-elevated); color: var(--oc-text-muted);
+        font-size: 10.5px; text-transform: uppercase; letter-spacing: .35px;
+      }
+      .slot-tr-head .right { text-align: right; }
+      .slot-tr .row-actions { margin-left: 0; justify-content: flex-end; gap: 4px; }
+      .cell-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .cell-stack strong { font-size: 12px; }
+      .nowrap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .right { text-align: right; }
+
+      .slot-compact { padding: 4px 10px; overflow-x: auto; }
+      .compact-row {
+        display: grid; gap: 9px; align-items: center; padding: 7px 6px;
+        grid-template-columns: 8px 96px 60px 84px minmax(150px, 1fr) minmax(112px, .9fr) 54px auto;
+        border-bottom: 1px solid #ffffff08; min-width: 780px;
+      }
+      .compact-row:last-child { border-bottom: 0; }
+      .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); }
+      .compact-row.tone-active .compact-dot { background: var(--oc-status-active); }
+      .compact-row.tone-cooldown .compact-dot { background: var(--oc-status-cooldown); }
+      .compact-row.tone-quarantine .compact-dot { background: var(--oc-status-quarantine); }
+      .compact-row.tone-warp .compact-dot { background: var(--oc-status-warp); }
+      .compact-row.tone-rotating .compact-dot { background: var(--oc-accent); }
+      .compact-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+      .compact-row .row-actions { margin-left: 0; gap: 4px; }
+      .btn.icon { padding: 4px 6px; }
+      .btn.armed { background: #ef44441a; border-color: var(--oc-status-quarantine); color: var(--oc-status-quarantine); }
+
       .btn {
         display: inline-flex; align-items: center; gap: 6px;
         border-radius: 7px; border: 1px solid var(--oc-border);
@@ -1416,6 +1943,55 @@ class EgressMatrixPanel extends HTMLElement {
       .row-meta { display: flex; flex-wrap: wrap; gap: 5px; }
       .row-actions { display: flex; gap: 6px; margin-left: auto; }
 
+      .node-table { display: flex; flex-direction: column; }
+      .node-tr { display: grid; grid-template-columns: 30px 40px minmax(180px, 1.2fr) minmax(220px, 1fr) auto; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid #ffffff0a; border-radius: 7px; }
+      .node-tr:last-child { border-bottom: 0; }
+      .node-tr.picked { background: #3b82f60d; }
+      .node-tr-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .35px; color: var(--oc-text-muted); border-bottom: 1px solid var(--oc-border); padding-bottom: 6px; }
+      .node-tr-head .right, .right { text-align: right; }
+      .pick { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+      .pick input { accent-color: var(--oc-accent); width: 14px; height: 14px; }
+      .col-idx { font-family: var(--oc-font-mono); font-size: 10.5px; color: var(--oc-text-muted); text-align: right; }
+      .node-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+      .node-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .node-name strong { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .node-uri { color: var(--oc-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .bulkbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 14px; border-color: #3b82f644; background: #3b82f60a; }
+      .bulkbar strong { font-size: 12px; color: var(--oc-accent); }
+      .pager { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid #ffffff0a; margin-top: 6px; }
+      .pager .muted { margin-right: auto; font-family: var(--oc-font-mono); }
+      .nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+      .seg { display: inline-flex; background: var(--oc-bg-elevated); border: 1px solid var(--oc-border); border-radius: 8px; padding: 2px; gap: 2px; }
+      .seg-btn { border: 0; background: transparent; color: var(--oc-text-muted); font-size: 11px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+      .seg-btn:hover { color: var(--oc-text-primary); }
+      .seg-btn.active { background: var(--oc-accent); color: #fff; }
+      .btn.icon { padding: 4px 6px; }
+      .btn.armed { background: #ef444420; border-color: #ef444466; color: #fca5a5; }
+
+      .slot-table-card { padding: 8px 12px; overflow-x: auto; }
+      .slot-tr { display: grid; grid-template-columns: 132px 62px 76px 108px minmax(110px, 1fr) 96px 108px auto; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid #ffffff0a; min-width: 820px; }
+      .slot-tr:last-child { border-bottom: 0; }
+      .slot-tr-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .35px; color: var(--oc-text-muted); border-bottom: 1px solid var(--oc-border); padding-bottom: 6px; }
+      .cell-stack { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+      .cell-stack strong { font-size: 11.5px; }
+      .cell-stack .muted { font-size: 10.5px; }
+      .slot-tr .row-actions { margin-left: 0; flex-wrap: nowrap; }
+
+      .slot-compact { display: flex; flex-direction: column; padding: 4px 10px; }
+      .compact-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #ffffff0a; min-width: 0; }
+      .compact-row:last-child { border-bottom: 0; }
+      .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); flex: 0 0 auto; }
+      .compact-row.tone-active .compact-dot { background: var(--oc-status-active); }
+      .compact-row.tone-cooldown .compact-dot { background: var(--oc-status-cooldown); }
+      .compact-row.tone-quarantine .compact-dot { background: var(--oc-status-quarantine); }
+      .compact-row.tone-warp .compact-dot { background: var(--oc-status-warp); }
+      .compact-row.tone-rotating .compact-dot { background: var(--oc-accent); }
+      .compact-row strong.mono { font-size: 11px; width: 76px; flex: 0 0 auto; }
+      .compact-row .port { width: 48px; flex: 0 0 auto; }
+      .compact-key { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+      .compact-row .row-actions { margin-left: auto; flex-wrap: nowrap; }
+
       .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 12px; align-items: end; }
       .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
       .field.inline { flex: 0 0 auto; }
@@ -1469,6 +2045,7 @@ class EgressMatrixPanel extends HTMLElement {
       .toast.tone-error { border-left-color: var(--oc-status-quarantine); }
 
       .modal-wrap { position: fixed; inset: 0; z-index: 30; background: #010409cc; display: grid; place-items: center; padding: 20px; }
+      .modal-wrap[hidden] { display: none; }
       .modal { width: min(560px, 100%); background: var(--oc-bg-card); border: 1px solid var(--oc-border); border-radius: 12px; padding: 16px 18px; box-shadow: 0 30px 80px -30px #000; max-height: 88vh; overflow-y: auto; }
       .modal form { display: flex; flex-direction: column; gap: 10px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
@@ -1491,6 +2068,8 @@ class EgressMatrixPanel extends HTMLElement {
         .statusbar .mono, .statusbar span:nth-child(3) { display: none; }
         .row { flex-wrap: wrap; }
         .row-actions { margin-left: 0; }
+        .node-table { overflow-x: auto; }
+        .node-tr { min-width: 720px; }
       }
     `;
   }

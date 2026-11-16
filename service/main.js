@@ -24,8 +24,10 @@ const { parseNodeUri, publicNode } = require('../lib/node-uri');
 const { createProxygateClient, normalizeSlot, slotDescriptor, syncLeases } = require('../lib/providers/proxygate');
 const { releasePort } = require('../lib/ports');
 const { syncSubscription } = require('../lib/subscriptions');
+const { planLeases, parseStartPort } = require('../lib/lease-batch');
 const {
   isControlPlaneHost,
+  matrixSlotIdForPort,
   normalizeFingerprint,
   normalizePrefix64,
   normalizeRoutingPlane,
@@ -249,53 +251,32 @@ function claimPort(state, key, port) {
   return port;
 }
 
-function slug(text) {
-  const cleaned = String(text || '').toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40);
-  return cleaned || 'node';
-}
-
-function leaseKeyFor(state, prefix, node) {
-  const base = `${prefix}/${slug(node.name)}`;
-  const taken = new Set((state.leases || []).map((lease) => lease.key));
-  if (!taken.has(base)) return base;
-  let index = 2;
-  while (taken.has(`${base}-${index}`)) index += 1;
-  return `${base}-${index}`;
-}
-
 function autoLeaseNodes(state, subscription, options = {}) {
-  const prefix = String(options.keyPrefix || subscription.keyPrefix || `sub/${slug(subscription.name)}`).replace(/\/+$/, '');
-  const startPort = options.startPort === undefined ? 0 : parsePort(options.startPort, '起始端口');
-  const country = String(options.country || '').trim().toUpperCase();
-  let created = 0;
+  const startPort = parseStartPort(options.startPort);
+  const plan = planLeases(state, subscription, options);
   let nextPort = startPort;
-
-  for (const node of state.nodes || []) {
-    if (node.subscriptionId !== subscription.id) continue;
-    if ((state.leases || []).some((lease) => lease.nodeId === node.id)) continue;
-    const key = leaseKeyFor(state, prefix, node);
+  for (const spec of plan.specs) {
     const lease = {
       id: store.newId('lease'),
-      key,
+      key: spec.key,
       provider: 'static',
-      nodeId: node.id,
-      country,
+      nodeId: spec.nodeId,
+      country: spec.country,
       port: 0,
+      matrixSlotId: nextPort ? matrixSlotIdForPort(nextPort) : '',
       ok: null,
+      exitIp: spec.exitIp || '',
+      exitIpCheckedAt: spec.checkedAt || '',
       createdAt: new Date().toISOString(),
     };
     if (nextPort) {
-      claimPort(state, key, nextPort);
+      claimPort(state, lease.key, nextPort);
       lease.port = nextPort;
       nextPort += 1;
     }
     state.leases.push(lease);
-    created += 1;
   }
-  return created;
+  return { created: plan.specs.length, skipped: plan.skipped };
 }
 
 function subscriptionView(state, subscription) {
@@ -319,7 +300,7 @@ function subscriptionView(state, subscription) {
 async function applySubscription(state, subscription) {
   const result = await syncSubscription(state, subscription, {});
   if (subscription.autoLease) {
-    result.createdLeases = autoLeaseNodes(state, subscription);
+    result.createdLeases = autoLeaseNodes(state, subscription).created;
   }
   fillPrimary(state);
   store.save(state);
@@ -341,6 +322,7 @@ function configView(state) {
       return {
         id: node.id,
         name: node.name,
+        uri: node.uri,
         subscriptionId: node.subscriptionId || '',
         createdAt: node.createdAt,
         lastCheck: node.lastCheck || null,
@@ -394,6 +376,123 @@ function endpointsView() {
 async function runNodeProbe(id) {
   const result = await engine.probeNode(id);
   return result;
+}
+
+const NODE_PROBE_BATCH = 12;
+const nodeProbeJob = {
+  running: false,
+  total: 0,
+  done: 0,
+  passed: 0,
+  failed: 0,
+  subscriptionId: '',
+  startedAt: '',
+  finishedAt: '',
+  error: '',
+};
+let pendingNodeChecks = [];
+
+function nodeProbeStatus() {
+  return Object.assign({}, nodeProbeJob);
+}
+
+function flushNodeChecks() {
+  if (!pendingNodeChecks.length) return;
+  const batch = pendingNodeChecks;
+  pendingNodeChecks = [];
+  try {
+    const state = store.load();
+    for (const item of batch) {
+      const node = store.findNode(state, item.nodeId);
+      if (node) node.lastCheck = item.lastCheck;
+    }
+    store.save(state);
+  } catch (error) {
+    log(`写入体检结果失败: ${error.message}`);
+  }
+}
+
+function startNodeProbeJob(body = {}) {
+  if (nodeProbeJob.running) {
+    throw Object.assign(new Error('节点体检正在进行'), { status: 409, code: 'node_probe_running' });
+  }
+  const state = store.load();
+  const subscriptionId = String(body.subscriptionId || '');
+  const force = body.force === true;
+  const ttlMs = Math.max(0, Number(body.ttlMs) || 0);
+  const limit = Math.max(0, Math.min(Number(body.limit) || 0, 5000));
+  const concurrency = Math.max(1, Math.min(Number(body.concurrency) || 16, 64));
+  const now = Date.now();
+
+  let nodes = (state.nodes || []).slice();
+  if (subscriptionId) nodes = nodes.filter((node) => node.subscriptionId === subscriptionId);
+  if (!force && ttlMs > 0) {
+    nodes = nodes.filter((node) => {
+      const check = node.lastCheck;
+      if (!check || !check.checkedAt) return true;
+      const at = Date.parse(check.checkedAt);
+      return !Number.isFinite(at) || now - at > ttlMs;
+    });
+  }
+  if (limit) nodes = nodes.slice(0, limit);
+
+  nodeProbeJob.running = true;
+  nodeProbeJob.total = nodes.length;
+  nodeProbeJob.done = 0;
+  nodeProbeJob.passed = 0;
+  nodeProbeJob.failed = 0;
+  nodeProbeJob.subscriptionId = subscriptionId;
+  nodeProbeJob.startedAt = new Date().toISOString();
+  nodeProbeJob.finishedAt = '';
+  nodeProbeJob.error = '';
+  pendingNodeChecks = [];
+
+  const queue = nodes.slice();
+  const workers = new Array(Math.min(concurrency, Math.max(queue.length, 1))).fill(0).map(async () => {
+    while (queue.length) {
+      const node = queue.shift();
+      let result;
+      try {
+        result = await engine.probeNode(node.id, { deep: true, persist: false });
+      } catch (error) {
+        result = {
+          ok: false,
+          lastCheck: {
+            ok: false,
+            exitIp: '',
+            asn: '',
+            country: '',
+            countryCode: '',
+            latencyMs: 0,
+            checkedAt: new Date().toISOString(),
+            error: error.message,
+          },
+        };
+      }
+      pendingNodeChecks.push({ nodeId: node.id, lastCheck: result.lastCheck });
+      if (result.ok) nodeProbeJob.passed += 1;
+      else nodeProbeJob.failed += 1;
+      nodeProbeJob.done += 1;
+      if (pendingNodeChecks.length >= NODE_PROBE_BATCH) flushNodeChecks();
+    }
+  });
+
+  Promise.all(workers).then(() => {
+    flushNodeChecks();
+    nodeProbeJob.running = false;
+    nodeProbeJob.finishedAt = new Date().toISOString();
+    log(`节点体检完成: ${nodeProbeJob.passed}/${nodeProbeJob.total} 通过`);
+  }).catch((error) => {
+    flushNodeChecks();
+    nodeProbeJob.running = false;
+    nodeProbeJob.finishedAt = new Date().toISOString();
+    nodeProbeJob.error = error.message;
+    log(`节点体检中断: ${error.message}`);
+  }).then(() => {
+    engine.reconcile('node-probe').catch((error) => log(`体检后同步失败: ${error.message}`));
+  });
+
+  return nodeProbeStatus();
 }
 
 async function probeLease(id) {
@@ -571,7 +670,7 @@ function egressApiRoutes(req, res, url, body, isBus) {
     }));
   }
 
-  const slotMatch = /^\/api\/v1\/egress\/slots\/([^/]+)(?:\/(rotate|quarantine|probe))?$/.exec(url.pathname);
+  const slotMatch = /^\/api\/v1\/egress\/slots\/([^/]+)(?:\/(rotate|quarantine|release|probe|remove))?$/.exec(url.pathname);
   if (slotMatch) {
     const matrixSlotId = decodeURIComponent(slotMatch[1]);
     const action = slotMatch[2] || '';
@@ -598,6 +697,23 @@ function egressApiRoutes(req, res, url, body, isBus) {
       return engine.releaseSlot(matrixSlotId).then((slot) => send(res, 200, {
         ok: true,
         slot,
+        state: engine.status(),
+      }));
+    }
+    if (req.method === 'POST' && action === 'remove') {
+      const state = store.load();
+      const slot = engine.getSlot(matrixSlotId);
+      const leaseId = slot && (slot.intentId || slot.leaseId);
+      const lease = leaseId ? store.findLease(state, leaseId) : null;
+      if (!lease) throw Object.assign(new Error('槽位没有可移除的租约'), { status: 404, code: 'lease_missing' });
+      releasePort(state, lease.key);
+      state.leases = (state.leases || []).filter((entry) => entry.id !== lease.id);
+      fillPrimary(state);
+      store.save(state);
+      const removed = { matrixSlotId, leaseId: lease.id, key: lease.key, egressPort: slot.egressPort || 0 };
+      return engine.reconcile('slot-remove').then(() => send(res, 200, {
+        ok: true,
+        removed,
         state: engine.status(),
       }));
     }
@@ -749,6 +865,14 @@ async function listRoutes(req, res, url, body) {
     }));
   }
 
+  if (url.pathname === '/api/nodes/probe-all' && req.method === 'POST') {
+    return send(res, 202, { ok: true, job: startNodeProbeJob(body) });
+  }
+
+  if (url.pathname === '/api/nodes/probe-status' && req.method === 'GET') {
+    return send(res, 200, { ok: true, job: nodeProbeStatus() });
+  }
+
   if (parts[0] === 'api' && parts[1] === 'nodes' && id) {
     const state = store.load();
     const node = store.findNode(state, id);
@@ -875,16 +999,18 @@ async function listRoutes(req, res, url, body) {
     }
 
     if (parts[3] === 'leases' && req.method === 'POST') {
-      const created = autoLeaseNodes(state, subscription, {
+      const plan = autoLeaseNodes(state, subscription, {
         keyPrefix: body.keyPrefix,
         startPort: body.startPort,
         country: body.country,
+        onlyPassed: body.onlyPassed !== false,
       });
       fillPrimary(state);
       store.save(state);
       return engine.reconcile('subscription-leases').then(() => send(res, 201, {
         ok: true,
-        created,
+        created: plan.created,
+        skipped: plan.skipped,
         config: configView(store.load()),
       }));
     }
@@ -898,16 +1024,18 @@ async function listRoutes(req, res, url, body) {
     const state = store.load();
     const subscription = (state.subscriptions || []).find((sub) => sub.id === String(body.subscriptionId || ''));
     if (!subscription) throw Object.assign(new Error('先选择一个订阅'), { status: 400, code: 'subscription_missing' });
-    const created = autoLeaseNodes(state, subscription, {
+    const plan = autoLeaseNodes(state, subscription, {
       keyPrefix: body.keyPrefix,
       startPort: body.startPort,
       country: body.country,
+      onlyPassed: body.onlyPassed !== false,
     });
     fillPrimary(state);
     store.save(state);
     return engine.reconcile('leases-batch').then(() => send(res, 201, {
       ok: true,
-      created,
+      created: plan.created,
+      skipped: plan.skipped,
       config: configView(store.load()),
     }));
   }
@@ -924,12 +1052,14 @@ async function listRoutes(req, res, url, body) {
     if ((state.leases || []).some((lease) => lease.key === key)) {
       throw Object.assign(new Error('租约 key 重复'), { status: 409, code: 'lease_key_exists' });
     }
+    const check = node.lastCheck || null;
+    const probedCountry = check && check.ok ? String(check.countryCode || '').toUpperCase() : '';
     const lease = {
       id: store.newId('lease'),
       key,
       provider: 'static',
       nodeId: node.id,
-      country: String(body.country || '').trim().toUpperCase(),
+      country: String(body.country || '').trim().toUpperCase() || probedCountry,
       port: 0,
       ok: null,
       createdAt: new Date().toISOString(),
@@ -1014,7 +1144,7 @@ async function listRoutes(req, res, url, body) {
     return engine.probe().then(() => send(res, 200, { ok: true, engine: engine.status(), config: configView(store.load()) }));
   }
 
-  if (url.pathname === '/healthz') {
+  if (url.pathname === '/health' || url.pathname === '/healthz') {
     return send(res, 200, { ok: true, version: VERSION });
   }
 

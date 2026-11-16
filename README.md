@@ -30,6 +30,8 @@ OpenChamber 生态的统一出口网络中枢。一个扩展，管理 **250 个�
 2. 打开 设置 → 扩展 → Egress Matrix，允许 `service`。
 3. 重启 OpenChamber，面板出现后即可使用。
 
+> 运行中的 OpenChamber 只读扩展目录里的副本（Windows 默认 `%USERPROFILE%\.config\openchamber\extensions\egress-matrix`），不会跟随仓库热更新。改完本仓库后要把 `service/` 和 `ui/` 重新复制过去，再完全退出并重开 OpenChamber；否则会出现面板是新的、接口还是旧的。
+
 首次打开没有任何出口。添加一个节点、导入订阅，或填好 proxygate 后同步槽位；`默认网关` 会立刻出现在「总览」。
 
 ## 面板
@@ -37,9 +39,9 @@ OpenChamber 生态的统一出口网络中枢。一个扩展，管理 **250 个�
 按功能分成七个标签：
 
 - **总览**：默认网关、槽位计数、出口 IP、健康分布、总线状态，以及契约文件速览。
-- **槽位**：全部矩阵槽位；可探测、换血、隔离、释放，复制 HTTP/SOCKS 地址，查看 `/64`、ASN、`leaseId`。
-- **节点池**：手动添加单条节点 URI；列表显示来源（手动/订阅）、协议、探测和建租约。
-- **订阅**：导入整池节点；可同步、批量建租约、删除。同步只更新本订阅节点，不碰手动节点。
+- **槽位**：全部矩阵槽位；卡片 / 列表 / 紧凑三种视图（选择会记住）；可探测、换血、隔离 / 解除，复制 HTTP/SOCKS 地址，查看 `/64`、ASN、`leaseId`；任意状态都能「移除」——删除租约并关闭监听，需二次确认。
+- **节点池**：手动添加单条节点 URI；勾选、行序号与分页（20 / 50 / 100 / 全部）；批量探测、建租约、复制 URI、删除，可全选筛选结果；行内编辑名称与 URI；一键批量体检整池，记录出口 IP、国家、ASN 与延迟，并发可选 8 / 16 / 32 / 64；按来源、可用性、国家筛选排序。
+- **订阅**：导入整池节点；可同步、批量建租约、删除。批量建租约默认只取体检通过的节点，可指定起始槽位（`slot-010` 或 `24010`）。同步只更新本订阅节点，不碰手动节点。
 - **上游**：proxygate 地址、API Key、公开 SOCKS 主机、SOCKS 密码、默认国家；同步槽位、分配槽位、换出口 IP。
 - **轮转**：换血事件流、冻结/恢复回调注册、旋转历史。
 - **设置**：默认端口、控制面域名白名单、WARP 池（开关/端点/冷却）、探测 URL、契约文件路径。
@@ -119,13 +121,15 @@ OpenChamber 生态的统一出口网络中枢。一个扩展，管理 **250 个�
 | GET | `/api/events` | 换血事件 |
 | POST/GET | `/api/nodes` | 添加/列出静态节点 |
 | PATCH/DELETE | `/api/nodes/:id` | 改名/改 URI、删除（级联租约） |
-| POST | `/api/nodes/:id/probe` | 临时链路探测 |
+| POST | `/api/nodes/:id/probe` | 临时链路探测（出口 IP、国家、ASN、延迟） |
+| POST | `/api/nodes/probe-all` | 批量体检，可带 `subscriptionId`、`limit`、`ttl`、`concurrency`（默认 16，上限 64） |
+| GET | `/api/nodes/probe-status` | 体检进度与通过/失败计数 |
 | GET/POST | `/api/subscriptions` | 订阅列表 / 导入 |
 | PATCH/DELETE | `/api/subscriptions/:id` | 修改 / 删除 |
 | POST | `/api/subscriptions/:id/sync` | 重新拉取订阅 |
 | POST | `/api/subscriptions/:id/leases` | 批量建租约 |
 | GET/POST | `/api/leases` | 列表 / 新建静态租约 |
-| POST | `/api/leases/batch` | 按订阅批量建租约 |
+| POST | `/api/leases/batch` | 按订阅批量建租约（默认只取体检通过，可带 `startPort`） |
 | PATCH/DELETE | `/api/leases/:id` | 改 key/端口/国家、设为主、删除 |
 | POST | `/api/leases/:id/probe` | 走真实监听探测 |
 | POST | `/api/proxygate/sync` | 拉槽位并同步租约 |
@@ -133,6 +137,11 @@ OpenChamber 生态的统一出口网络中枢。一个扩展，管理 **250 个�
 | POST | `/api/proxygate/rotate` | 轮换槽位 `{slotId}` |
 | POST | `/api/reconcile` | 重算监听 |
 | POST | `/api/probe` | 全量探测 |
+| POST | `/api/v1/egress/slots/:id/probe` | 槽位端到端探测 |
+| POST | `/api/v1/egress/slots/:id/rotate` | 蓝绿换血 |
+| POST | `/api/v1/egress/slots/:id/quarantine` | 隔离槽位 |
+| POST | `/api/v1/egress/slots/:id/release` | 解除隔离（QUARANTINED → ACTIVE） |
+| POST | `/api/v1/egress/slots/:id/remove` | 删除租约并移除槽位 |
 
 ## 双平面
 
@@ -146,7 +155,7 @@ OpenChamber 生态的统一出口网络中枢。一个扩展，管理 **250 个�
 npm test
 ```
 
-48 个用例，覆盖契约字段与端口映射、文件锁并发、租约/回调/事件存储、`/64` 污点冲突、防滥用判定、WARP 池健康、换血状态机与身份校验、双平面请求头解析与透传、节点 URI、VLESS/Trojan 握手、订阅解码、proxygate 同步。
+56 个用例，覆盖契约字段与端口映射、文件锁并发、租约/回调/事件存储、`/64` 污点冲突、防滥用判定、WARP 池健康、换血状态机与身份校验、双平面请求头解析与透传、节点 URI、VLESS/Trojan 握手、订阅解码、proxygate 同步、批量租约筛选。
 
 ## 边界
 

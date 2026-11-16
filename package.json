@@ -1,6 +1,6 @@
 {
   "name": "openchamber-egress-matrix",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Unified egress hub for OpenChamber: 250 contract slots (24001-24250), dual-plane routing, /64 taint ledger, blue-green rotation, local bus.",
   "license": "MIT",
