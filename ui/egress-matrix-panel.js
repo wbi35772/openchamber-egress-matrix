@@ -2225,7 +2225,8 @@ class EgressMatrixPanel extends HTMLElement {
         .brand { padding: 0 6px 0 0; }
         .brand-text { display: none; }
         .nav { flex-direction: row; gap: 4px; }
-        .nav-item { padding: 7px 9px; }
+        .nav-item { padding: 7px 9px; white-space: nowrap; }
+        .nav-item svg { display: none; }
         .nav-item.active::before { display: none; }
         .nav-count { display: none; }
         .rail-foot { margin: 0 0 0 auto; border-top: 0; padding: 0; }
