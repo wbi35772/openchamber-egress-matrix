@@ -16,6 +16,15 @@ const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_STALE_MS = 30000;
 const DEFAULT_RETRY_MS = 25;
 
+/*
+ * Windows and WSL2 hand out transient sharing violations (EPERM/EBUSY/EACCES)
+ * when another process holds a handle to the target for a few milliseconds.
+ * Retrying the rename with a short backoff removes those cross-process races
+ * without ever deleting a valid target file first.
+ */
+const RENAME_RETRY_DELAYS_MS = [15, 30, 60, 120, 240];
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -111,16 +120,30 @@ async function readJson(file, fallback = null) {
   }
 }
 
+async function renameWithRetry(temp, file) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fsp.rename(temp, file);
+      return;
+    } catch (error) {
+      if (!RENAME_RETRY_CODES.has(error.code) || attempt >= RENAME_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      await delay(RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
 async function writeJsonAtomic(file, data) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   const body = `${JSON.stringify(data, null, 2)}\n`;
   await fsp.writeFile(temp, body, 'utf8');
   try {
-    await fsp.rename(temp, file);
-  } catch {
-    await fsp.rm(file, { force: true }).catch(() => {});
-    await fsp.rename(temp, file);
+    await renameWithRetry(temp, file);
+  } catch (error) {
+    await fsp.rm(temp, { force: true }).catch(() => {});
+    throw error;
   }
 }
 
@@ -138,6 +161,7 @@ async function mutateJson(file, fallback, mutator, options = {}) {
 module.exports = {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_STALE_MS,
+  RENAME_RETRY_DELAYS_MS,
   acquireLock,
   withFileLock,
   readJson,

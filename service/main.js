@@ -44,6 +44,38 @@ const BODY_LIMIT = 512 * 1024;
 const MASK = '••••••';
 const VERSION = require('../package.json').version;
 
+const CORS_ALLOW_HEADERS = 'Authorization, Content-Type, X-OC-Routing-Plane, X-OC-Matrix-Token';
+const CORS_ALLOW_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
+
+const PANEL_ROOT = path.join(__dirname, '..', 'ui');
+const PANEL_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+function corsHeaders() {
+  return {
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': CORS_ALLOW_HEADERS,
+    'access-control-allow-methods': CORS_ALLOW_METHODS,
+    'access-control-max-age': '86400',
+  };
+}
+
 function log(message) {
   try { process.stderr.write(`[egress-matrix] ${message}\n`); } catch { /* ignore */ }
 }
@@ -89,7 +121,7 @@ function send(res, status, payload, headers = {}) {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'content-length': Buffer.byteLength(body),
-  }, headers));
+  }, corsHeaders(), headers));
   res.end(body);
 }
 
@@ -105,6 +137,63 @@ function failure(res, error) {
       status,
     },
   });
+}
+
+const PANEL_PREFIXES = ['/ui', '/panel'];
+
+function panelPrefix(pathname) {
+  for (const prefix of PANEL_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return prefix;
+  }
+  return '';
+}
+
+function notFound(res, message) {
+  send(res, 404, { ok: false, error: { code: 'not_found', message } });
+}
+
+async function servePanel(req, res, url) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    return send(res, 405, { ok: false, error: { code: 'method_not_allowed', message: '静态资源只支持 GET/HEAD' } });
+  }
+
+  const prefix = panelPrefix(url.pathname);
+  if (!prefix) return notFound(res, '静态资源不存在');
+  if (url.pathname === prefix) {
+    res.writeHead(308, { location: `${prefix}/`, 'cache-control': 'no-store' });
+    return res.end();
+  }
+
+  let relative;
+  try {
+    relative = decodeURIComponent(url.pathname.slice(prefix.length)).replace(/^\/+/, '');
+  } catch {
+    return send(res, 400, { ok: false, error: { code: 'bad_path', message: '静态路径无法解码' } });
+  }
+  if (!relative || relative.endsWith('/')) relative = `${relative}index.html`;
+  if (relative.includes('\0')) return notFound(res, '静态资源不存在');
+
+  const file = path.resolve(PANEL_ROOT, relative);
+  if (file !== PANEL_ROOT && !file.startsWith(`${PANEL_ROOT}${path.sep}`)) {
+    return notFound(res, '静态资源不存在');
+  }
+
+  let body;
+  try {
+    const stat = await fs.promises.stat(file);
+    if (!stat.isFile()) return notFound(res, '静态资源不存在');
+    body = await fs.promises.readFile(file);
+  } catch {
+    return notFound(res, '静态资源不存在');
+  }
+
+  res.writeHead(200, {
+    'content-type': PANEL_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+    'content-length': body.length,
+    'cache-control': 'no-cache',
+    'x-content-type-options': 'nosniff',
+  });
+  res.end(req.method === 'HEAD' ? undefined : body);
 }
 
 function authorized(req) {
@@ -696,6 +785,18 @@ async function bindLease(body = {}) {
 }
 
 function egressApiRoutes(req, res, url, body, isBus) {
+  if (url.pathname === '/api/v1/egress/bus-health' && req.method === 'GET') {
+    const status = engine.status();
+    return send(res, 200, {
+      ok: true,
+      service: 'egress-matrix',
+      activeSlots: (status.slots || []).filter((slot) => slot && slot.listener).length,
+      warpPoolSize: Number(status.warp && status.warp.total) || 0,
+      wsClientsCount: Number(wsHub.clientCount) || 0,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   if (url.pathname === '/api/v1/egress/state' && req.method === 'GET') {
     return egressState().then((payload) => send(res, 200, payload));
   }
@@ -1302,8 +1403,13 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type' });
+    res.writeHead(204, corsHeaders());
     return res.end();
+  }
+
+  if (panelPrefix(url.pathname)) {
+    servePanel(req, res, url).catch((error) => failure(res, error));
+    return;
   }
 
   if (!authorized(req)) {
@@ -1348,11 +1454,7 @@ const busServer = http.createServer((req, res) => {
   }
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': 'authorization,content-type,x-oc-routing-plane',
-      'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-    });
+    res.writeHead(204, corsHeaders());
     return res.end();
   }
 

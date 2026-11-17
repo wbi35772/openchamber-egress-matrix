@@ -159,6 +159,51 @@ describe('store-lock', () => {
     assert.equal(final.count, 3);
     assert.equal(Number.isInteger(final.updatedAt), true);
   });
+
+  it('retries transient sharing violations on rename', async (t) => {
+    const fsp = require('node:fs/promises');
+    const original = fsp.rename;
+    let calls = 0;
+    t.mock.method(fsp, 'rename', async (...args) => {
+      calls += 1;
+      if (calls <= 2) throw Object.assign(new Error('sharing violation'), { code: 'EBUSY' });
+      return original(...args);
+    });
+
+    const file = path.join(STATE_DIR, 'retry-rename.json');
+    await storeLock.writeJsonAtomic(file, { ok: 'retried' });
+    assert.equal(calls, 3);
+    assert.deepEqual(await storeLock.readJson(file), { ok: 'retried' });
+  });
+
+  it('gives up after five backoffs and removes the temp file', async (t) => {
+    const fsp = require('node:fs/promises');
+    let calls = 0;
+    t.mock.method(fsp, 'rename', async () => {
+      calls += 1;
+      throw Object.assign(new Error('still locked'), { code: 'EPERM' });
+    });
+
+    const file = path.join(STATE_DIR, 'locked-rename.json');
+    await assert.rejects(() => storeLock.writeJsonAtomic(file, { ok: false }), /still locked/);
+    assert.equal(calls, 6);
+    assert.equal(fs.existsSync(file), false);
+    const leftovers = fs.readdirSync(STATE_DIR).filter((name) => name.startsWith('locked-rename.json.') && name.endsWith('.tmp'));
+    assert.deepEqual(leftovers, []);
+  });
+
+  it('does not retry non-sharing rename errors', async (t) => {
+    const fsp = require('node:fs/promises');
+    let calls = 0;
+    t.mock.method(fsp, 'rename', async () => {
+      calls += 1;
+      throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    });
+
+    const file = path.join(STATE_DIR, 'no-space.json');
+    await assert.rejects(() => storeLock.writeJsonAtomic(file, { ok: false }), /disk full/);
+    assert.equal(calls, 1);
+  });
 });
 
 describe('matrix-store', () => {

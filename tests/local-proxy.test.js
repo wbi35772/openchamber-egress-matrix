@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 const http = require('node:http');
 
-const { createMixedProxy } = require('../lib/local-proxy');
+const { createMixedProxy, readProxyAuthPlane } = require('../lib/local-proxy');
 const { createSocketTunnel } = require('../lib/upstream');
 
 function waitFor(predicate, timeoutMs = 5000) {
@@ -237,4 +237,81 @@ test('explicit elastic header overrides control-domain detection', async () => {
   client.destroy();
   await proxy.close();
   await echo.close();
+});
+
+test('proxy-authorization accepts plane, bearer and slot-xxx forms', () => {
+  const headers = (value) => ['GET http://example.test/ HTTP/1.1', 'Host: example.test', `Proxy-Authorization: ${value}`];
+  assert.equal(readProxyAuthPlane(headers('Plane STRICT_CONTROL')), 'STRICT_CONTROL');
+  assert.equal(readProxyAuthPlane(headers('Bearer plane=ELASTIC_DATA')), 'ELASTIC_DATA');
+  assert.equal(readProxyAuthPlane(headers('slot-042:STRICT_CONTROL')), 'STRICT_CONTROL');
+  assert.equal(readProxyAuthPlane(headers(`Basic ${Buffer.from('slot-007:ELASTIC_DATA').toString('base64')}`)), 'ELASTIC_DATA');
+  assert.equal(readProxyAuthPlane(headers('slot-042:bogus')), '');
+});
+
+function startRawOrigin() {
+  const sockets = new Set();
+  const requests = [];
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    let buffer = '';
+    let answered = false;
+    socket.on('data', (chunk) => {
+      if (answered) return;
+      buffer += chunk.toString('latin1');
+      const end = buffer.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      answered = true;
+      requests.push(buffer.slice(0, end + 4));
+      socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok');
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      requests,
+      close: () => {
+        for (const socket of sockets) socket.destroy();
+        return new Promise((done) => server.close(done));
+      },
+    }));
+  });
+}
+
+test('internal routing headers never reach the origin', async () => {
+  const origin = await startRawOrigin();
+  const planes = [];
+  const proxy = await createMixedProxy({
+    port: 0,
+    upstreamFor: async (target, meta) => {
+      planes.push(meta.routingPlane);
+      return tcpTunnelFactory('127.0.0.1', origin.port)();
+    },
+  });
+
+  const client = net.connect(proxy.port, '127.0.0.1');
+  const body = readUntilClose(client);
+  client.write([
+    'GET http://example.test/private HTTP/1.1',
+    'Host: example.test',
+    'X-OC-Routing-Plane: STRICT_CONTROL',
+    'Proxy-Authorization: slot-042:ELASTIC_DATA',
+    'Proxy-Connection: keep-alive',
+    'X-Keep-Me: yes',
+    '',
+    '',
+  ].join('\r\n'));
+
+  const text = await body;
+  assert.match(text, /200 OK/);
+  assert.deepEqual(planes, ['STRICT_CONTROL']);
+  assert.equal(origin.requests.length, 1);
+  const head = origin.requests[0].toLowerCase();
+  assert.doesNotMatch(head, /\r\nx-oc-routing-plane:/);
+  assert.doesNotMatch(head, /\r\nproxy-authorization:/);
+  assert.doesNotMatch(head, /\r\nproxy-connection:/);
+  assert.match(head, /\r\nx-keep-me: yes/);
+
+  await proxy.close();
+  await origin.close();
 });
