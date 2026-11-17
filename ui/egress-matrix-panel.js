@@ -879,8 +879,8 @@ class EgressMatrixPanel extends HTMLElement {
     const strict = plane === 'STRICT_CONTROL';
     return [
       '<div class="slot-rails">',
-      '<div class="rail"><span class="rail-label">健康</span><span class="rail-track"><i class="tone-' + healthTone + '" style="width:' + healthPct + '%"></i></span><span class="rail-value">' + esc(HEALTH_LABEL[health] || health) + '</span></div>',
-      '<div class="rail"><span class="rail-label">平面</span><span class="rail-track"><i class="' + (strict ? 'tone-strict' : 'tone-elastic') + '" style="width:' + (strict ? 100 : 64) + '%"></i></span><span class="rail-value">' + (strict ? 'STRICT' : 'ELASTIC') + '</span></div>',
+      '<div class="slot-rail"><span class="rail-label">健康</span><span class="rail-track"><i class="tone-' + healthTone + '" style="width:' + healthPct + '%"></i></span><span class="rail-value">' + esc(HEALTH_LABEL[health] || health) + '</span></div>',
+      '<div class="slot-rail"><span class="rail-label">平面</span><span class="rail-track"><i class="' + (strict ? 'tone-strict' : 'tone-elastic') + '" style="width:' + (strict ? 100 : 64) + '%"></i></span><span class="rail-value">' + (strict ? 'STRICT' : 'ELASTIC') + '</span></div>',
       '</div>',
     ].join('');
   }
@@ -1294,8 +1294,8 @@ class EgressMatrixPanel extends HTMLElement {
       '<div class="card-head"><h2>冻结回调</h2><span class="muted">PRE_ROTATION_FREEZE 预算 200ms</span></div>',
       '<form class="form-grid" data-form="cb-add">',
       '<label class="field"><span>clientId</span><input name="clientId" data-field="cb-id" placeholder="openchamber-cloudflare" required /></label>',
-      '<label class="field span-2"><span>回调 URL</span><input name="url" data-field="cb-url" placeholder="http://127.0.0.1:PORT/rotation" required /></label>',
-      '<label class="check span-2"><input type="checkbox" name="PRE_ROTATION_FREEZE" value="1" checked /> <span>PRE_ROTATION_FREEZE</span></label>',
+      '<label class="field"><span>回调 URL</span><input name="url" data-field="cb-url" placeholder="http://127.0.0.1:PORT/rotation" required /></label>',
+      '<label class="check"><input type="checkbox" name="PRE_ROTATION_FREEZE" value="1" checked /> <span>PRE_ROTATION_FREEZE</span></label>',
       '<label class="check"><input type="checkbox" name="POST_ROTATION_RESUME" value="1" checked /> <span>POST_ROTATION_RESUME</span></label>',
       '<label class="check"><input type="checkbox" name="ROTATION_FAILED" value="1" checked /> <span>ROTATION_FAILED</span></label>',
       '<label class="check"><input type="checkbox" name="LEASE_CHANGED" value="1" checked /> <span>LEASE_CHANGED</span></label>',
@@ -2034,49 +2034,6 @@ class EgressMatrixPanel extends HTMLElement {
       .toolbar.card { padding: 12px 14px; }
       .toolbar-meta { margin-left: auto; color: var(--oc-text-muted); font-size: 11px; font-family: var(--oc-font-mono); }
 
-      .seg { display: inline-flex; border: 1px solid var(--oc-border); border-radius: 8px; overflow: hidden; background: var(--oc-bg-elevated); }
-      .seg-btn { border: 0; background: transparent; color: var(--oc-text-muted); padding: 6px 11px; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
-      .seg-btn + .seg-btn { border-left: 1px solid var(--oc-border); }
-      .seg-btn:hover { background: #ffffff0a; color: var(--oc-text-primary); }
-      .seg-btn.active { background: var(--oc-accent); color: #fff; }
-
-      .slot-table-card { padding: 0; overflow-x: auto; }
-      .slot-tr {
-        display: grid; gap: 10px; align-items: center; padding: 9px 14px;
-        grid-template-columns: 150px 64px 84px 108px minmax(118px, 1fr) minmax(96px, .85fr) 108px 168px;
-        border-bottom: 1px solid #ffffff0a; min-width: 900px;
-      }
-      .slot-tr:last-child { border-bottom: 0; }
-      .slot-tr-head {
-        position: sticky; top: 0; z-index: 1;
-        background: var(--oc-bg-elevated); color: var(--oc-text-muted);
-        font-size: 10.5px; text-transform: uppercase; letter-spacing: .35px;
-      }
-      .slot-tr-head .right { text-align: right; }
-      .slot-tr .row-actions { margin-left: 0; justify-content: flex-end; gap: 4px; }
-      .cell-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-      .cell-stack strong { font-size: 12px; }
-      .nowrap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .right { text-align: right; }
-
-      .slot-compact { padding: 4px 10px; overflow-x: auto; }
-      .compact-row {
-        display: grid; gap: 9px; align-items: center; padding: 7px 6px;
-        grid-template-columns: 8px 96px 60px 84px minmax(150px, 1fr) minmax(112px, .9fr) 54px auto;
-        border-bottom: 1px solid #ffffff08; min-width: 780px;
-      }
-      .compact-row:last-child { border-bottom: 0; }
-      .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); }
-      .compact-row.tone-active .compact-dot { background: #10b981; animation: slot-breathe 2.4s ease-in-out infinite; }
-      .compact-row.tone-cooldown .compact-dot { background: var(--oc-status-cooldown); }
-      .compact-row.tone-quarantine .compact-dot { background: var(--oc-status-quarantine); }
-      .compact-row.tone-warp .compact-dot { background: var(--oc-status-warp); }
-      .compact-row.tone-rotating .compact-dot { background: var(--oc-accent); }
-      .compact-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
-      .compact-row .row-actions { margin-left: 0; gap: 4px; }
-      .btn.icon { padding: 4px 6px; }
-      .btn.armed { background: #ef44441a; border-color: var(--oc-status-quarantine); color: var(--oc-status-quarantine); }
-
       .btn {
         display: inline-flex; align-items: center; gap: 6px;
         border-radius: 7px; border: 1px solid var(--oc-border);
@@ -2115,7 +2072,7 @@ class EgressMatrixPanel extends HTMLElement {
         50% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
       }
       .slot-rails { display: grid; gap: 4px; margin: 2px 0 1px; }
-      .rail { display: grid; grid-template-columns: 30px minmax(0, 1fr) 62px; align-items: center; gap: 7px; }
+      .slot-rail { display: grid; grid-template-columns: 30px minmax(0, 1fr) 62px; align-items: center; gap: 7px; }
       .rail-label { font-size: 9.5px; letter-spacing: .35px; text-transform: uppercase; color: var(--oc-text-muted); }
       .rail-track { position: relative; height: 4px; border-radius: 999px; background: #ffffff12; overflow: hidden; }
       .rail-track i { display: block; height: 100%; border-radius: inherit; background: var(--oc-border); transition: width .25s ease; }
@@ -2155,8 +2112,8 @@ class EgressMatrixPanel extends HTMLElement {
       .row-meta { display: flex; flex-wrap: wrap; gap: 5px; }
       .row-actions { display: flex; gap: 6px; margin-left: auto; }
 
-      .node-table { display: flex; flex-direction: column; }
-      .node-tr { display: grid; grid-template-columns: 30px 40px minmax(180px, 1.2fr) minmax(220px, 1fr) auto; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid #ffffff0a; border-radius: 7px; }
+      .node-table { display: flex; flex-direction: column; overflow-x: auto; }
+      .node-tr { display: grid; grid-template-columns: 30px 40px minmax(180px, 1.2fr) minmax(220px, 1fr) 250px; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid #ffffff0a; border-radius: 7px; min-width: 760px; }
       .node-tr:last-child { border-bottom: 0; }
       .node-tr.picked { background: #3b82f60d; }
       .node-tr-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .35px; color: var(--oc-text-muted); border-bottom: 1px solid var(--oc-border); padding-bottom: 6px; }
@@ -2188,10 +2145,10 @@ class EgressMatrixPanel extends HTMLElement {
       .cell-stack { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
       .cell-stack strong { font-size: 11.5px; }
       .cell-stack .muted { font-size: 10.5px; }
-      .slot-tr .row-actions { margin-left: 0; flex-wrap: nowrap; }
+      .slot-tr .row-actions { margin-left: 0; flex-wrap: nowrap; justify-content: flex-end; gap: 4px; }
 
-      .slot-compact { display: flex; flex-direction: column; padding: 4px 10px; }
-      .compact-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #ffffff0a; min-width: 0; }
+      .slot-compact { display: flex; flex-direction: column; padding: 4px 10px; overflow-x: auto; }
+      .compact-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #ffffff0a; min-width: 640px; }
       .compact-row:last-child { border-bottom: 0; }
       .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); flex: 0 0 auto; }
       .compact-row.tone-active .compact-dot { background: #10b981; animation: slot-breathe 2.4s ease-in-out infinite; }
@@ -2204,7 +2161,7 @@ class EgressMatrixPanel extends HTMLElement {
       .compact-key { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
       .compact-row .row-actions { margin-left: auto; flex-wrap: nowrap; }
 
-      .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 12px; align-items: end; }
+      .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; align-items: end; }
       .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
       .field.inline { flex: 0 0 auto; }
       .field.grow { flex: 1 1 180px; }
@@ -2219,7 +2176,7 @@ class EgressMatrixPanel extends HTMLElement {
       }
       .field textarea { resize: vertical; font-family: var(--oc-font-mono); font-size: 11.5px; }
       .span-2 { grid-column: span 2; }
-      @media (max-width: 640px) { .span-2 { grid-column: span 1; } }
+      @media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } .span-2 { grid-column: span 1; } }
       .check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--oc-text-muted); padding-bottom: 8px; }
       .check input { accent-color: var(--oc-accent); width: 14px; height: 14px; }
       .actions { justify-content: flex-end; flex-direction: row; align-items: end; }
