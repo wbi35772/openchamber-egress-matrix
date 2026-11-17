@@ -19,6 +19,7 @@ const path = require('node:path');
 const store = require('../lib/store');
 const { createRouterEngine } = require('../core/router-engine');
 const { createRotationCoordinator } = require('../core/rotation-coordinator');
+const { createWsHub } = require('../lib/ws');
 const matrixStore = require('../core/matrix-store');
 const { parseNodeUri, publicNode } = require('../lib/node-uri');
 const { createProxygateClient, normalizeSlot, slotDescriptor, syncLeases } = require('../lib/providers/proxygate');
@@ -26,6 +27,8 @@ const { releasePort } = require('../lib/ports');
 const { syncSubscription } = require('../lib/subscriptions');
 const { planLeases, parseStartPort } = require('../lib/lease-batch');
 const {
+  egressPortForIndex,
+  indexForSlotId,
   isControlPlaneHost,
   matrixSlotIdForPort,
   normalizeFingerprint,
@@ -61,7 +64,22 @@ const engine = createRouterEngine({
   log,
 });
 
-const rotation = createRotationCoordinator({ engine, log });
+const wsHub = createWsHub({ log });
+const rotation = createRotationCoordinator({ engine, log, wsHub });
+
+/*
+ * Every contract-visible slot transition becomes a SLOT_STATE_UPDATED frame
+ * on the local WebSocket hub. The panel merges these into its matrix view so
+ * health lights and progress rails move without waiting for the poll timer.
+ */
+engine.observe((event) => {
+  if (!event || event.type !== 'SLOT_STATE_UPDATED' || !event.slot) return;
+  wsHub.broadcast('SLOT_STATE_UPDATED', {
+    matrixSlotId: event.slot.matrixSlotId,
+    slot: event.slot,
+    removed: Boolean(event.slot.removed),
+  });
+});
 
 const startedAt = Date.now();
 
@@ -628,6 +646,55 @@ async function rotateMatrixSlot(matrixSlotId, body = {}) {
   return result;
 }
 
+/*
+ * Bind one config lease to an explicit matrix slot. Port math always comes
+ * from core/contract; the lease row is the config source of truth, while
+ * egress-leases.json receives the mirrored contract record via store.save().
+ */
+async function bindLease(body = {}) {
+  const matrixSlotId = String(body.matrixSlotId || '').trim();
+  const index = indexForSlotId(matrixSlotId);
+  if (!index) {
+    throw Object.assign(new Error('matrixSlotId 必须是 slot-001..slot-250'), {
+      status: 400,
+      code: 'invalid_slot',
+    });
+  }
+  const state = store.load();
+  const leaseId = String(body.leaseId || body.intentId || '').trim();
+  let lease = leaseId ? store.findLease(state, leaseId) : null;
+  if (!lease && !leaseId && body.key) {
+    lease = (state.leases || []).find((entry) => entry.key === String(body.key)) || null;
+  }
+  if (!lease) {
+    throw Object.assign(new Error('租约不存在'), { status: 404, code: 'lease_missing' });
+  }
+  const owner = (state.leases || []).find((entry) => entry.id !== lease.id
+    && entry.matrixSlotId === matrixSlotId);
+  if (owner) {
+    throw Object.assign(new Error(`槽位 ${matrixSlotId} 已被租约 ${owner.key} 占用`), {
+      status: 409,
+      code: 'slot_taken',
+    });
+  }
+  lease.matrixSlotId = matrixSlotId;
+  lease.egressPort = egressPortForIndex(index);
+  store.save(state);
+  await engine.reconcile('lease-bind');
+  const slot = engine.getSlot(matrixSlotId);
+  return {
+    matrixSlotId,
+    egressPort: lease.egressPort,
+    lease: {
+      id: lease.id,
+      key: lease.key,
+      matrixSlotId,
+      egressPort: lease.egressPort,
+    },
+    slot,
+  };
+}
+
 function egressApiRoutes(req, res, url, body, isBus) {
   if (url.pathname === '/api/v1/egress/state' && req.method === 'GET') {
     return egressState().then((payload) => send(res, 200, payload));
@@ -668,6 +735,81 @@ function egressApiRoutes(req, res, url, body, isBus) {
       result,
       state: engine.status(),
     }));
+  }
+
+  if (url.pathname === '/api/v1/egress/slots' && req.method === 'GET') {
+    const status = engine.status();
+    return send(res, 200, {
+      ok: true,
+      count: (status.slots || []).length,
+      defaultPort: status.defaultPort,
+      primary: status.primary,
+      slots: status.slots || [],
+      lanes: status.lanes || [],
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  if (url.pathname === '/api/v1/egress/lease/bind' && req.method === 'POST') {
+    return bindLease(body).then((payload) => send(res, 200, Object.assign({ ok: true }, payload)));
+  }
+
+  if (url.pathname === '/api/v1/egress/lease/rotate' && req.method === 'POST') {
+    let matrixSlotId = String(body.matrixSlotId || '').trim();
+    if (!matrixSlotId) {
+      const leaseId = String(body.leaseId || body.intentId || '').trim();
+      const state = leaseId ? store.load() : null;
+      const lease = state ? store.findLease(state, leaseId) : null;
+      matrixSlotId = String((lease && lease.matrixSlotId) || '').trim();
+    }
+    if (!matrixSlotId) {
+      throw Object.assign(new Error('旋转需要 matrixSlotId 或已绑定槽位的 leaseId'), {
+        status: 400,
+        code: 'slot_id_required',
+      });
+    }
+    return rotateMatrixSlot(matrixSlotId, body).then((slot) => send(res, 200, {
+      ok: true,
+      matrixSlotId,
+      slot,
+      state: engine.status(),
+    }));
+  }
+
+  if (url.pathname === '/api/v1/egress/ack-freeze' && req.method === 'POST') {
+    const clientId = String(body.clientId || '').trim();
+    const eventId = String(body.eventId || '').trim();
+    if (!clientId || !eventId) {
+      throw Object.assign(new Error('缺少 clientId 或 eventId'), {
+        status: 400,
+        code: 'ack_invalid',
+      });
+    }
+    const acknowledged = wsHub.ack(clientId, eventId, body.ok !== false);
+    return send(res, acknowledged ? 200 : 409, {
+      ok: acknowledged,
+      clientId,
+      eventId,
+      acknowledged,
+      hub: wsHub.status(),
+    });
+  }
+
+  const leaseMatch = /^\/api\/v1\/egress\/lease\/([^/]+)$/.exec(url.pathname);
+  if (leaseMatch && req.method === 'GET') {
+    const matrixSlotId = decodeURIComponent(leaseMatch[1]);
+    const cached = store.slotLease(matrixSlotId);
+    const slot = cached.slot || engine.getSlot(matrixSlotId);
+    if (!slot) {
+      throw Object.assign(new Error('槽位不存在'), { status: 404, code: 'slot_missing' });
+    }
+    return send(res, 200, {
+      ok: true,
+      matrixSlotId,
+      source: cached.slot ? 'cache' : 'engine',
+      slot,
+      lease: cached.lease,
+    });
   }
 
   const slotMatch = /^\/api\/v1\/egress\/slots\/([^/]+)(?:\/(rotate|quarantine|release|probe|remove))?$/.exec(url.pathname);
@@ -1233,15 +1375,18 @@ const busServer = http.createServer((req, res) => {
 });
 
 busServer.on('error', (error) => log(`本地总线监听失败: ${error.message}`));
+wsHub.attach(busServer);
 if (BUS_PORT > 0) {
   busServer.listen(BUS_PORT, HOST, () => {
     log(`bus listening on http://${HOST}:${BUS_PORT}/api/v1/egress`);
+    log(`ws listening on ws://${HOST}:${BUS_PORT}${wsHub.path}`);
   });
 }
 
 function shutdown(signal) {
   log(`收到 ${signal}，正在关闭`);
   const done = () => {
+    wsHub.close();
     server.close(() => process.exit(0));
     if (BUS_PORT > 0) busServer.close();
     setTimeout(() => process.exit(0), 3000).unref();

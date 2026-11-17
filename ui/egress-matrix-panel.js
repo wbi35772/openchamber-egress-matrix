@@ -4,6 +4,8 @@
 const CHANNEL = 'openchamber.sdk';
 const WIRE = 1;
 const BUS_URL = 'http://127.0.0.1:19880/api/v1/egress';
+const WS_URL = BUS_URL.replace(/^http/, 'ws') + '/ws?clientId=openchamber-panel';
+const WS_RETRY_MS = 8000;
 const TAB_STORAGE_KEY = 'egress-matrix.tab.v2';
 const SLOT_VIEW_KEY = 'egress-matrix.slot-view.v1';
 
@@ -59,6 +61,19 @@ const HEALTH_LABEL = {
   WARP_OVERFLOW: 'WARP 溢出',
   ROTATING: '旋转中',
 };
+
+const HEALTH_RAIL = {
+  ACTIVE: 100,
+  COOLDOWN: 45,
+  QUARANTINED: 6,
+  WARP_OVERFLOW: 72,
+  ROTATING: 28,
+};
+
+function slotIndex(matrixSlotId) {
+  const match = /(\d+)$/.exec(String(matrixSlotId || ''));
+  return match ? Number(match[1]) : 0;
+}
 
 function esc(value) {
   return String(value == null ? '' : value)
@@ -124,6 +139,9 @@ class EgressMatrixPanel extends HTMLElement {
     this._booted = false;
     this._toastTimer = null;
     this._autoTimer = null;
+    this._ws = null;
+    this._wsRetry = null;
+    this._pushTimer = null;
     this.state = {
       tab: 'overview',
       config: null,
@@ -133,6 +151,9 @@ class EgressMatrixPanel extends HTMLElement {
       error: '',
       busy: '',
       toast: null,
+      wsStatus: 'off',
+      lastPushAt: 0,
+      rotationFreeze: null,
       filter: { health: 'ALL', plane: 'ALL', q: '' },
       nodeFilter: { status: 'ALL', country: 'ALL', subscription: 'ALL', sort: 'name', q: '', page: 1, pageSize: 20 },
       nodePick: new Set(),
@@ -168,6 +189,7 @@ class EgressMatrixPanel extends HTMLElement {
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       this.refresh({ quiet: true });
     }, 15000);
+    this.connectWs();
   }
 
   disconnectedCallback() {
@@ -176,6 +198,145 @@ class EgressMatrixPanel extends HTMLElement {
     this._autoTimer = null;
     if (this._jobTimer) clearInterval(this._jobTimer);
     this._jobTimer = null;
+    if (this._pushTimer) clearTimeout(this._pushTimer);
+    this._pushTimer = null;
+    this.closeWs();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* live link                                                         */
+  /* ---------------------------------------------------------------- */
+
+  /*
+   * The WebSocket is an accelerator, never a dependency: when the iframe CSP
+   * blocks it, the 15 s poll above stays the source of truth and the panel
+   * keeps working with wsStatus = 'fallback'.
+   */
+  connectWs() {
+    this.closeWs();
+    if (typeof WebSocket === 'undefined' || !this.isConnected) return;
+    let socket;
+    try {
+      socket = new WebSocket(WS_URL);
+    } catch (error) {
+      this.state.wsStatus = 'fallback';
+      this.renderChrome();
+      return;
+    }
+    this._ws = socket;
+    this.state.wsStatus = 'connecting';
+    this.renderChrome();
+    socket.onopen = () => {
+      if (this._ws !== socket) return;
+      this.state.wsStatus = 'live';
+      this.renderChrome();
+    };
+    socket.onmessage = (event) => {
+      let frame = null;
+      try {
+        frame = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data));
+      } catch (error) {
+        return;
+      }
+      this.handleWsFrame(frame);
+    };
+    socket.onerror = () => {
+      if (this._ws !== socket) return;
+      this.state.wsStatus = 'fallback';
+    };
+    socket.onclose = () => {
+      if (this._ws !== socket) return;
+      this._ws = null;
+      if (this.state.wsStatus !== 'off') this.state.wsStatus = 'fallback';
+      this.renderChrome();
+      if (!this.isConnected) return;
+      clearTimeout(this._wsRetry);
+      this._wsRetry = setTimeout(() => this.connectWs(), WS_RETRY_MS);
+    };
+  }
+
+  closeWs() {
+    clearTimeout(this._wsRetry);
+    this._wsRetry = null;
+    const socket = this._ws;
+    this._ws = null;
+    this.state.wsStatus = 'off';
+    if (socket) {
+      try { socket.close(1000, 'panel detached'); } catch (error) { /* ignore */ }
+    }
+  }
+
+  sendWsAck(eventId, ok) {
+    const socket = this._ws;
+    if (!socket || socket.readyState !== 1) return false;
+    try {
+      socket.send(JSON.stringify({ type: 'ACK_FREEZE', eventId, ok: ok !== false }));
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  handleWsFrame(frame) {
+    if (!frame || !frame.type) return;
+    if (frame.type === 'SLOT_STATE_UPDATED') {
+      const slot = frame.slot || {};
+      this.mergeSlotState(slot, Boolean(frame.removed));
+      this.state.lastPushAt = Date.now();
+      this.scheduleRender();
+      return;
+    }
+    if (frame.type === 'PRE_ROTATION_FREEZE') {
+      this.state.rotationFreeze = {
+        matrixSlotId: frame.matrixSlotId,
+        eventId: frame.eventId,
+        deadlineMs: Number(frame.deadlineMs) || 0,
+        at: Date.now(),
+      };
+      this.sendWsAck(frame.eventId, true);
+      this.mergeSlotState({ matrixSlotId: frame.matrixSlotId, healthState: 'ROTATING' });
+      this.toast('槽位 ' + frame.matrixSlotId + ' 冻结，等待换血', 'info');
+      this.scheduleRender();
+      return;
+    }
+    if (frame.type === 'POST_ROTATION_RESUME') {
+      this.state.rotationFreeze = null;
+      this.mergeSlotState({
+        matrixSlotId: frame.matrixSlotId,
+        healthState: 'ACTIVE',
+        leaseId: frame.leaseId,
+        egressFingerprint: frame.egressFingerprint,
+      });
+      this.toast('槽位 ' + frame.matrixSlotId + ' 换血完成', 'success');
+      this.scheduleRender();
+    }
+  }
+
+  mergeSlotState(slot, removed) {
+    if (!slot || !slot.matrixSlotId) return;
+    const apply = (list, push) => {
+      if (!Array.isArray(list)) return list;
+      const index = list.findIndex((item) => item.matrixSlotId === slot.matrixSlotId);
+      if (removed) {
+        if (index >= 0) list.splice(index, 1);
+        return list;
+      }
+      if (index >= 0) list[index] = Object.assign({}, list[index], slot);
+      else if (push) list.push(slot);
+      list.sort((left, right) => slotIndex(left.matrixSlotId) - slotIndex(right.matrixSlotId));
+      return list;
+    };
+    if (this.state.matrix) this.state.matrix.slots = apply(this.state.matrix.slots || [], true);
+    if (this.state.config) this.state.config.slots = apply(this.state.config.slots || [], false);
+  }
+
+  scheduleRender() {
+    if (this._pushTimer) return;
+    this._pushTimer = setTimeout(() => {
+      this._pushTimer = null;
+      this.renderChrome();
+      this.renderView();
+    }, 120);
   }
 
   shellTemplate() {
@@ -413,8 +574,14 @@ class EgressMatrixPanel extends HTMLElement {
     const conn = this.shadowRoot.getElementById('conn');
     if (conn) {
       const ok = this._connected && !this.state.error;
+      const ws = this.state.wsStatus;
       conn.className = 'conn' + (ok ? ' live' : this.state.error ? ' down' : '');
-      conn.innerHTML = '<i></i><span>' + esc(ok ? '本地服务已连接' : this.state.error ? '连接异常' : '等待主程序') + '</span>';
+      const label = ok
+        ? (ws === 'live' ? '实时链路已连接' : ws === 'connecting' ? '实时链路握手中' : '本地服务已连接 · 轮询')
+        : this.state.error ? '连接异常' : '等待主程序';
+      conn.innerHTML = '<i></i><span>' + esc(label) + '</span>'
+        + (ok && ws !== 'live' ? '<em class="conn-badge">POLL</em>' : '')
+        + (ok && this.state.lastPushAt ? '<em class="conn-badge" title="最近推送">' + esc(fmtTime(this.state.lastPushAt)) + '</em>' : '');
     }
     const meta = this.shadowRoot.getElementById('rail-meta');
     if (meta) {
@@ -699,17 +866,38 @@ class EgressMatrixPanel extends HTMLElement {
     ].join('');
   }
 
+  /*
+   * Two rails per card: health availability (contract healthState) and the
+   * routing plane the slot is pinned to. Both come straight from the pushed
+   * slot record, so a WS update repaints without a full refresh.
+   */
+  slotRails(slot) {
+    const health = String(slot.healthState || 'COOLDOWN').toUpperCase();
+    const healthTone = HEALTH_TONE[health] || 'muted';
+    const healthPct = HEALTH_RAIL[health] === undefined ? 40 : HEALTH_RAIL[health];
+    const plane = String(slot.routingPlane || 'ELASTIC_DATA').toUpperCase();
+    const strict = plane === 'STRICT_CONTROL';
+    return [
+      '<div class="slot-rails">',
+      '<div class="rail"><span class="rail-label">健康</span><span class="rail-track"><i class="tone-' + healthTone + '" style="width:' + healthPct + '%"></i></span><span class="rail-value">' + esc(HEALTH_LABEL[health] || health) + '</span></div>',
+      '<div class="rail"><span class="rail-label">平面</span><span class="rail-track"><i class="' + (strict ? 'tone-strict' : 'tone-elastic') + '" style="width:' + (strict ? 100 : 64) + '%"></i></span><span class="rail-value">' + (strict ? 'STRICT' : 'ELASTIC') + '</span></div>',
+      '</div>',
+    ].join('');
+  }
+
   slotCard(slot) {
     const fingerprint = slot.egressFingerprint || {};
     const cooldown = Number(slot.cooldownUntil) > Date.now() ? ' · 至 ' + fmtTime(slot.cooldownUntil) : '';
     return [
       '<article class="slot card tone-' + (HEALTH_TONE[slot.healthState] || 'muted') + '">',
       '<header>',
+      '<span class="slot-pulse" aria-hidden="true"></span>',
       '<div class="slot-id"><strong>' + esc(slot.matrixSlotId) + '</strong><button class="port" data-act="copy" data-copy="127.0.0.1:' + esc(slot.egressPort) + '" data-label="端口">127.0.0.1:' + esc(slot.egressPort) + '</button></div>',
       healthBadge(slot.healthState),
       '</header>',
       '<div class="slot-key">' + esc(slot.key || '—') + '</div>',
       '<div class="slot-badges">' + planeBadge(slot.routingPlane) + '<span class="badge tone-muted">' + esc(slot.provider || 'static') + '</span>' + (slot.country ? '<span class="badge tone-muted">' + esc(slot.country) + '</span>' : '') + '</div>',
+      this.slotRails(slot),
       '<dl class="slot-meta">',
       '<div><dt>出口 IP</dt><dd>' + esc(fingerprint.exitIp || '待探测') + '</dd></div>',
       '<div><dt>/64</dt><dd title="' + esc(fingerprint.ipv6Prefix64 || '') + '">' + esc(fingerprint.ipv6Prefix64 || '—') + '</dd></div>',
@@ -1879,7 +2067,7 @@ class EgressMatrixPanel extends HTMLElement {
       }
       .compact-row:last-child { border-bottom: 0; }
       .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); }
-      .compact-row.tone-active .compact-dot { background: var(--oc-status-active); }
+      .compact-row.tone-active .compact-dot { background: #10b981; animation: slot-breathe 2.4s ease-in-out infinite; }
       .compact-row.tone-cooldown .compact-dot { background: var(--oc-status-cooldown); }
       .compact-row.tone-quarantine .compact-dot { background: var(--oc-status-quarantine); }
       .compact-row.tone-warp .compact-dot { background: var(--oc-status-warp); }
@@ -1916,6 +2104,30 @@ class EgressMatrixPanel extends HTMLElement {
       .slot.tone-quarantine::before { background: var(--oc-status-quarantine); }
       .slot.tone-warp::before { background: var(--oc-status-warp); }
       .slot.tone-rotating::before { background: var(--oc-accent); }
+      .slot-pulse { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--oc-border); opacity: .7; }
+      .slot.tone-active .slot-pulse { background: #10b981; opacity: 1; animation: slot-breathe 2.4s ease-in-out infinite; }
+      .slot.tone-cooldown .slot-pulse { background: var(--oc-status-cooldown); }
+      .slot.tone-quarantine .slot-pulse { background: var(--oc-status-quarantine); }
+      .slot.tone-warp .slot-pulse { background: var(--oc-status-warp); }
+      .slot.tone-rotating .slot-pulse { background: var(--oc-accent); animation: slot-breathe 1s ease-in-out infinite; }
+      @keyframes slot-breathe {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, .55); }
+        50% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+      }
+      .slot-rails { display: grid; gap: 4px; margin: 2px 0 1px; }
+      .rail { display: grid; grid-template-columns: 30px minmax(0, 1fr) 62px; align-items: center; gap: 7px; }
+      .rail-label { font-size: 9.5px; letter-spacing: .35px; text-transform: uppercase; color: var(--oc-text-muted); }
+      .rail-track { position: relative; height: 4px; border-radius: 999px; background: #ffffff12; overflow: hidden; }
+      .rail-track i { display: block; height: 100%; border-radius: inherit; background: var(--oc-border); transition: width .25s ease; }
+      .rail-track i.tone-active { background: #10b981; }
+      .rail-track i.tone-cooldown { background: var(--oc-status-cooldown); }
+      .rail-track i.tone-quarantine { background: var(--oc-status-quarantine); }
+      .rail-track i.tone-warp { background: var(--oc-status-warp); }
+      .rail-track i.tone-rotating { background: var(--oc-accent); }
+      .rail-track i.tone-strict { background: #f59e0b; }
+      .rail-track i.tone-elastic { background: #38bdf8; }
+      .rail-value { font-family: var(--oc-font-mono); font-size: 9.5px; color: var(--oc-text-muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .conn-badge { margin-left: 6px; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--oc-border); font-size: 9.5px; font-style: normal; color: var(--oc-text-muted); font-family: var(--oc-font-mono); }
       .slot header { display: flex; align-items: center; gap: 8px; }
       .slot-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
       .slot-id strong { font-family: var(--oc-font-mono); font-size: 12px; letter-spacing: .3px; }
@@ -1982,7 +2194,7 @@ class EgressMatrixPanel extends HTMLElement {
       .compact-row { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #ffffff0a; min-width: 0; }
       .compact-row:last-child { border-bottom: 0; }
       .compact-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--oc-border); flex: 0 0 auto; }
-      .compact-row.tone-active .compact-dot { background: var(--oc-status-active); }
+      .compact-row.tone-active .compact-dot { background: #10b981; animation: slot-breathe 2.4s ease-in-out infinite; }
       .compact-row.tone-cooldown .compact-dot { background: var(--oc-status-cooldown); }
       .compact-row.tone-quarantine .compact-dot { background: var(--oc-status-quarantine); }
       .compact-row.tone-warp .compact-dot { background: var(--oc-status-warp); }

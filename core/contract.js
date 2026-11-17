@@ -81,29 +81,47 @@ function normalizeHealthState(value, fallback = 'ACTIVE') {
   return HEALTH_STATES.includes(state) ? state : fallback;
 }
 
-function normalizePrefix64(value) {
+function stripHextet(value) {
+  const text = String(value || '').toLowerCase();
+  if (!/^[0-9a-f]{1,4}$/.test(text)) return '';
+  return text === '0000' ? '0' : text.replace(/^0+(?=.)/, '');
+}
+
+/*
+ * Fully expand an IPv6 literal into its eight 16-bit hextets. Compressed
+ * (`::`), bracketed (`[..]`) and prefix-length forms are accepted; anything
+ * malformed returns null. This is the only place IPv6 parsing happens.
+ */
+function expandIpv6(value) {
   let text = String(value || '').trim();
-  if (!text) return '';
-  text = text.replace(/^\[/, '').replace(/\]$/, '').split('/')[0];
-  if (!text.includes(':')) return '';
+  if (!text) return null;
+  const slash = text.indexOf('/');
+  if (slash >= 0) text = text.slice(0, slash);
+  text = text.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (!text.includes(':')) return null;
   const halves = text.split('::');
-  const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
-  const tail = halves.length > 1 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
   let parts;
-  if (halves.length > 1) {
+  if (halves.length === 2) {
     const fill = 8 - head.length - tail.length;
-    if (fill < 0) return '';
+    if (fill < 1) return null;
     parts = [...head, ...new Array(fill).fill('0'), ...tail];
   } else {
+    if (head.length !== 8) return null;
     parts = head;
   }
-  if (parts.length < 4) return '';
-  const hextets = parts.slice(0, 4).map((part) => {
-    if (!/^[0-9a-f]{1,4}$/i.test(part)) return '';
-    return part.toLowerCase().replace(/^0+(?=.)/, '');
-  });
-  if (hextets.some((part) => !part)) return '';
-  return `${hextets.join(':')}::/64`;
+  if (parts.length !== 8) return null;
+  const expanded = parts.map(stripHextet);
+  if (expanded.some((part) => !part)) return null;
+  return expanded;
+}
+
+function normalizePrefix64(value) {
+  const parts = expandIpv6(value);
+  if (!parts) return '';
+  return `${parts.slice(0, 4).join(':')}::/64`;
 }
 
 function hostMatchesDomain(host, domain) {
@@ -177,6 +195,7 @@ module.exports = {
   normalizeRoutingPlane,
   normalizeHealthState,
   normalizePrefix64,
+  expandIpv6,
   hostMatchesDomain,
   isControlPlaneHost,
   emptyFingerprint,

@@ -7,7 +7,8 @@
  * matrix slot. The sequence is intentionally serialized per slot:
  *
  *   1. mark ROTATING and stop accepting new connections on the slot
- *   2. fire PRE_ROTATION_FREEZE to registered clients (200 ms budget)
+ *   2. fire PRE_ROTATION_FREEZE over HTTP callbacks and the local WS hub,
+ *      waiting at most 500 ms for the ACK
  *   3. swap the upstream, verify the new exit fingerprint
  *   4. claim the new /64 and exit IP in the taint ledger
  *   5. reopen the listener, mark ACTIVE, fire POST_ROTATION_RESUME
@@ -20,6 +21,7 @@ const ledger = require('./subnet-taint-ledger');
 const { normalizeFingerprint } = require('./contract');
 
 const FREEZE_TIMEOUT_MS = 200;
+const WS_FREEZE_TIMEOUT_MS = 500;
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -58,6 +60,7 @@ async function dispatchEvent(event, payload, options = {}) {
       }), timeoutMs, `回调 ${callback.clientId || callback.id}`);
       return {
         clientId: callback.clientId,
+        channel: 'http',
         ok: response.ok,
         status: response.status,
         latencyMs: Date.now() - startedAt,
@@ -66,6 +69,7 @@ async function dispatchEvent(event, payload, options = {}) {
       log(`旋转回调 ${callback.clientId || callback.id} 失败: ${error.message}`);
       return {
         clientId: callback.clientId,
+        channel: 'http',
         ok: false,
         status: 0,
         latencyMs: Date.now() - startedAt,
@@ -78,14 +82,54 @@ async function dispatchEvent(event, payload, options = {}) {
 function createRotationCoordinator(options = {}) {
   const engine = options.engine;
   const log = typeof options.log === 'function' ? options.log : () => {};
+  const wsHub = options.wsHub || null;
   const running = new Map();
 
+  async function broadcastFreeze(event, payload) {
+    if (!wsHub) return null;
+    try {
+      const result = await wsHub.broadcastAwait(event, payload, { timeoutMs: WS_FREEZE_TIMEOUT_MS });
+      return result && Array.isArray(result.results)
+        ? result.results.map((entry) => Object.assign({ channel: 'ws' }, entry))
+        : [];
+    } catch (error) {
+      log(`WS 冻结广播失败: ${error.message}`);
+      return [{ clientId: 'ws-hub', channel: 'ws', ok: false, status: 0, latencyMs: 0, error: error.message }];
+    }
+  }
+
+  function broadcastResume(event, payload) {
+    if (!wsHub) return [];
+    try {
+      const result = wsHub.broadcast(event, payload);
+      return [{
+        clientId: 'ws-hub',
+        channel: 'ws',
+        ok: true,
+        status: 200,
+        latencyMs: 0,
+        clients: (result && result.clients) || 0,
+        delivered: (result && result.delivered) || 0,
+      }];
+    } catch (error) {
+      log(`WS 恢复广播失败: ${error.message}`);
+      return [{ clientId: 'ws-hub', channel: 'ws', ok: false, status: 0, latencyMs: 0, error: error.message }];
+    }
+  }
+
   async function emit(event, payload) {
-    const results = await dispatchEvent(event, payload, { log });
-    await matrixStore.appendEvent(event, Object.assign({ delivery: results }, payload)).catch((error) => {
+    const httpTask = dispatchEvent(event, payload, { log });
+    const wsTask = event === 'PRE_ROTATION_FREEZE' ? broadcastFreeze(event, payload) : Promise.resolve();
+    const [httpResults, wsResults] = await Promise.all([httpTask, wsTask]);
+    const resume = event === 'POST_ROTATION_RESUME' ? broadcastResume(event, payload) : [];
+    const delivery = []
+      .concat(Array.isArray(httpResults) ? httpResults : [])
+      .concat(Array.isArray(wsResults) ? wsResults : [])
+      .concat(resume);
+    await matrixStore.appendEvent(event, Object.assign({ delivery }, payload)).catch((error) => {
       log(`记录旋转事件失败: ${error.message}`);
     });
-    return results;
+    return delivery;
   }
 
   async function rotate(matrixSlotId, apply, meta = {}) {
@@ -112,7 +156,7 @@ function createRotationCoordinator(options = {}) {
       await engine.suspendSlot(slotId, 'ROTATING');
       await emit('PRE_ROTATION_FREEZE', {
         matrixSlotId: slotId,
-        deadlineMs: FREEZE_TIMEOUT_MS,
+        deadlineMs: WS_FREEZE_TIMEOUT_MS,
         reason: meta.reason || 'manual',
       });
 
@@ -163,11 +207,12 @@ function createRotationCoordinator(options = {}) {
     }
   }
 
-  return { rotate, emit, dispatchEvent };
+  return { rotate, emit, dispatchEvent, running };
 }
 
 module.exports = {
   FREEZE_TIMEOUT_MS,
+  WS_FREEZE_TIMEOUT_MS,
   dispatchEvent,
   createRotationCoordinator,
 };

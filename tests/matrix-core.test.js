@@ -9,6 +9,9 @@ const path = require('node:path');
 
 const STATE_DIR = path.join(os.tmpdir(), `oc-matrix-test-${process.pid}-${Date.now()}`);
 process.env.OPENCHAMBER_MATRIX_STATE_DIR = STATE_DIR;
+process.env.EGRESS_MATRIX_DATA_DIR = path.join(STATE_DIR, 'data');
+
+const http = require('node:http');
 
 const contract = require('../core/contract');
 const sub2port = require('../core/sub2port');
@@ -18,8 +21,11 @@ const ledger = require('../core/subnet-taint-ledger');
 const abuse = require('../core/abuse-guard');
 const { createWarpPool, endpointList } = require('../core/warp-pool');
 const rotation = require('../core/rotation-coordinator');
+const ws = require('../lib/ws');
 const { createMixedProxy, readRoutingPlane } = require('../lib/local-proxy');
 const leaseBatch = require('../lib/lease-batch');
+const store = require('../lib/store');
+const ports = require('../lib/ports');
 
 after(() => {
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
@@ -583,5 +589,157 @@ describe('lease batch planning', () => {
       'airport/tokyo-3',
     ]);
     assert.deepEqual(plan.specs.map((spec) => spec.country), ['TH', 'TH', 'TH']);
+  });
+
+  it('skips nodes whose exit IP is tainted by another matrix slot', () => {
+    const state = {
+      leases: [],
+      nodes: [
+        checked('n_tainted', 'tainted', 'TH'),
+        checked('n_clean', 'clean', 'TH'),
+      ],
+    };
+    state.nodes[0].lastCheck.exitIp = '198.18.10.10';
+    state.nodes[1].lastCheck.exitIp = '198.18.10.11';
+    const snapshot = {
+      prefixes: {},
+      exitIps: { '198.18.10.10': { matrixSlotId: 'slot-099' } },
+    };
+    const plan = leaseBatch.planLeases(state, sub, {
+      onlyPassed: true,
+      ledgerSnapshot: snapshot,
+      matrixSlotId: 'slot-050',
+    });
+    assert.equal(plan.specs.length, 1);
+    assert.equal(plan.specs[0].nodeId, 'n_clean');
+    assert.equal(plan.tainted, 1);
+
+    const owned = leaseBatch.planLeases(state, sub, {
+      onlyPassed: true,
+      ledgerSnapshot: snapshot,
+      matrixSlotId: 'slot-099',
+    });
+    assert.equal(owned.specs.length, 2);
+    assert.equal(owned.tainted, 0);
+  });
+});
+
+describe('ws hub freeze handshake', () => {
+  it('delivers PRE_ROTATION_FREEZE over WS and waits for ACK_FREEZE', async () => {
+    const hub = ws.createWsHub({ log: () => {} });
+    const server = http.createServer((req, res) => {
+      res.writeHead(404, { connection: 'close' });
+      res.end();
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    hub.attach(server);
+    const port = server.address().port;
+    const client = await ws.connect(`ws://127.0.0.1:${port}/api/v1/egress/ws?clientId=test-panel`);
+    client.resume();
+
+    const frames = [];
+    client.on('message', ({ data }) => {
+      let frame = null;
+      try {
+        frame = JSON.parse(data.toString('utf8'));
+      } catch {
+        return;
+      }
+      frames.push(frame);
+      if (frame.type === 'PRE_ROTATION_FREEZE') {
+        client.sendText(JSON.stringify({ type: 'ACK_FREEZE', eventId: frame.eventId, ok: true }));
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const slot = { matrixSlotId: 'slot-031', leaseId: 'lease-ws', egressFingerprint: contract.emptyFingerprint('lease-ws') };
+    const engine = {
+      getSlot: (id) => (id === slot.matrixSlotId ? Object.assign({}, slot, { healthState: 'ACTIVE' }) : null),
+      suspendSlot: async () => ({ matrixSlotId: slot.matrixSlotId, healthState: 'ROTATING' }),
+      failSlot: async () => ({}),
+      resumeSlot: async (id, patch) => ({
+        matrixSlotId: id,
+        leaseId: 'lease-ws',
+        egressFingerprint: patch.egressFingerprint,
+        healthState: 'ACTIVE',
+      }),
+    };
+    const coordinator = rotation.createRotationCoordinator({ engine, wsHub: hub, log: () => {} });
+
+    const updated = await coordinator.rotate('slot-031', async () => ({
+      descriptor: {},
+      egressFingerprint: {
+        exitIp: '198.18.20.31',
+        ipv6Prefix64: '2001:db8:531::/64',
+        leaseId: 'lease-ws',
+      },
+    }), { reason: 'ws-test' });
+
+    assert.equal(updated.healthState, 'ACTIVE');
+    assert.equal(frames.some((frame) => frame.type === 'PRE_ROTATION_FREEZE'), true);
+    assert.equal(frames.some((frame) => frame.type === 'POST_ROTATION_RESUME'), true);
+
+    const events = (await matrixStore.listEvents(50))
+      .filter((item) => item.matrixSlotId === 'slot-031');
+    const pre = events.find((item) => item.type === 'PRE_ROTATION_FREEZE');
+    assert.equal(Boolean(pre), true);
+    assert.equal(pre.delivery.some((entry) => entry.channel === 'ws' && entry.ok === true), true);
+    assert.equal(hub.ack('ghost', 'evt_missing', true), false);
+    assert.equal(hub.ack('test-panel', pre.eventId || 'evt_missing', true), false);
+
+    client.close(1000, 'done');
+    hub.close();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  });
+});
+
+describe('store and ports shim', () => {
+  it('round-trips state through the hot cache and mirrors contract leases', async () => {
+    const state = store.load();
+    state.settings.probeUrl = 'http://127.0.0.1:9/probe';
+    state.leases.push({
+      id: 'intent-slot-007',
+      key: 'sub/slot-007',
+      leaseId: 'lease-7',
+      matrixSlotId: 'slot-007',
+      routingPlane: 'ELASTIC_DATA',
+      healthState: 'ACTIVE',
+      egressFingerprint: {
+        exitIp: '198.18.30.7',
+        ipv6Prefix64: '2001:db8:607::/64',
+        asn: 'AS607',
+        leaseId: 'lease-7',
+        updatedAt: '',
+      },
+    });
+    store.save(state);
+    await store.flush();
+
+    assert.equal(store.load().settings.probeUrl, 'http://127.0.0.1:9/probe');
+    const mirrored = await matrixStore.findLease('slot-007');
+    assert.equal(Boolean(mirrored), true);
+    assert.equal(mirrored.egressPort, 24007);
+    assert.equal(mirrored.routingPlane, 'ELASTIC_DATA');
+    assert.equal(mirrored.egressFingerprint.exitIp, '198.18.30.7');
+
+    store.rememberSlot({ matrixSlotId: 'slot-007', healthState: 'ACTIVE', routingPlane: 'ELASTIC_DATA' });
+    assert.equal(store.slotLease('slot-007').slot.healthState, 'ACTIVE');
+    assert.equal(store.slotsSnapshot().length >= 1, true);
+    store.forgetSlot('slot-007');
+    assert.equal(store.slotLease('slot-007').slot, null);
+
+    store.invalidate();
+    assert.equal(store.load().settings.probeUrl, 'http://127.0.0.1:9/probe');
+  });
+
+  it('allocates and releases only deterministic matrix ports', () => {
+    const state = { ports: {}, leases: [], settings: {} };
+    assert.deepEqual(ports.pool(), { base: 24001, size: 250, end: 24251 });
+    const first = ports.allocatePort(state, 'k1');
+    assert.equal(first, 24001);
+    assert.equal(ports.allocatePort(state, 'k1'), 24001);
+    assert.equal(ports.releasePort(state, 'k1'), true);
+    assert.equal(ports.releasePort(state, 'k1'), false);
   });
 });

@@ -92,6 +92,45 @@ async function removeLease(matrixSlotId) {
   });
 }
 
+/*
+ * Insert or update one contract lease record without touching the others.
+ * Unlike replaceLeases this never wipes records owned by another writer.
+ */
+async function upsertLease(record) {
+  const errors = validateLeaseRecord(record);
+  if (errors.length) return { written: false, errors };
+  await mutateJson(LEASES_FILE, leasesShape(), (data) => {
+    data.leases = Array.isArray(data.leases) ? data.leases : [];
+    const index = data.leases.findIndex((item) => item.matrixSlotId === record.matrixSlotId);
+    const next = Object.assign({}, record, { updatedAt: now() });
+    if (index >= 0) data.leases[index] = Object.assign({}, data.leases[index], next);
+    else data.leases.push(next);
+  });
+  return { written: true, errors: [] };
+}
+
+async function upsertLeases(records) {
+  const clean = [];
+  const rejected = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const errors = validateLeaseRecord(record);
+    if (errors.length) rejected.push({ matrixSlotId: record && record.matrixSlotId, errors });
+    else clean.push(record);
+  }
+  if (clean.length) {
+    await mutateJson(LEASES_FILE, leasesShape(), (data) => {
+      data.leases = Array.isArray(data.leases) ? data.leases : [];
+      for (const record of clean) {
+        const index = data.leases.findIndex((item) => item.matrixSlotId === record.matrixSlotId);
+        const next = Object.assign({}, record, { updatedAt: now() });
+        if (index >= 0) data.leases[index] = Object.assign({}, data.leases[index], next);
+        else data.leases.push(next);
+      }
+    });
+  }
+  return { written: clean.length, rejected };
+}
+
 async function findLease(matrixSlotId) {
   const list = await listLeases();
   return list.find((item) => item.matrixSlotId === matrixSlotId) || null;
@@ -180,6 +219,8 @@ module.exports = {
   listLeases,
   replaceLeases,
   patchLease,
+  upsertLease,
+  upsertLeases,
   removeLease,
   findLease,
   listCallbacks,

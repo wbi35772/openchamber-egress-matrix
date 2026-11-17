@@ -165,3 +165,76 @@ test('upstream failure returns 502 and counts the failure', async () => {
   await waitFor(() => proxy.stats.failed === 1);
   await proxy.close();
 });
+
+test('abuse guard blocks before any upstream is dialed', async () => {
+  let dialed = 0;
+  const guarded = [];
+  const proxy = await createMixedProxy({
+    port: 0,
+    guard: async (target, meta) => {
+      guarded.push({ host: target.host, port: target.port, guardChecked: meta.guardChecked });
+      if (target.host === '169.254.169.254') {
+        return { allow: false, code: 'metadata_endpoint_blocked', status: 403, reason: '云元数据地址被禁止' };
+      }
+      return { allow: true };
+    },
+    upstreamFor: async () => {
+      dialed += 1;
+      throw new Error('guard should have stopped this');
+    },
+  });
+  const client = net.connect(proxy.port, '127.0.0.1');
+  const body = readUntilClose(client);
+  client.write('CONNECT 169.254.169.254:80 HTTP/1.1\r\nHost: 169.254.169.254:80\r\n\r\n');
+  const text = await body;
+  assert.match(text, /403 Forbidden/);
+  assert.match(text, /X-OC-Error: METADATA_ENDPOINT_BLOCKED/);
+  assert.equal(dialed, 0);
+  assert.deepEqual(guarded, [{ host: '169.254.169.254', port: 80, guardChecked: true }]);
+  await waitFor(() => proxy.stats.blocked === 1);
+  await proxy.close();
+});
+
+test('strict control plane fails closed with 503 and never falls back', async () => {
+  let requested = null;
+  const proxy = await createMixedProxy({
+    port: 0,
+    controlDomains: ['api.cloudflare.com'],
+    upstreamFor: async (target, meta) => {
+      requested = meta.routingPlane;
+      if (meta.routingPlane === 'STRICT_CONTROL') {
+        throw Object.assign(new Error('严格模式上游不可用'), { code: 'strict_control_failclosed' });
+      }
+      throw new Error('elastic path must not run');
+    },
+  });
+  const client = net.connect(proxy.port, '127.0.0.1');
+  const body = readUntilClose(client);
+  client.write('CONNECT api.cloudflare.com:443 HTTP/1.1\r\nHost: api.cloudflare.com:443\r\n\r\n');
+  const text = await body;
+  assert.equal(requested, 'STRICT_CONTROL');
+  assert.match(text, /503 Service Unavailable/);
+  assert.match(text, /EGRESS_STRICT_CONTROL_BLOCKED/);
+  await proxy.close();
+});
+
+test('explicit elastic header overrides control-domain detection', async () => {
+  const echo = await startEcho();
+  const seen = [];
+  const proxy = await createMixedProxy({
+    port: 0,
+    controlDomains: ['api.cloudflare.com'],
+    upstreamFor: async (target, meta) => {
+      seen.push(meta.routingPlane);
+      return tcpTunnelFactory('127.0.0.1', echo.port)();
+    },
+  });
+  const client = net.connect(proxy.port, '127.0.0.1');
+  client.write('CONNECT api.cloudflare.com:443 HTTP/1.1\r\nHost: api.cloudflare.com:443\r\nX-OC-Routing-Plane: ELASTIC_DATA\r\n\r\n');
+  const head = await readExactly(client, 'HTTP/1.1 200 Connection Established\r\nProxy-Agent: egress-matrix\r\n\r\n'.length);
+  assert.match(head.toString(), /^HTTP\/1\.1 200/);
+  assert.deepEqual(seen, ['ELASTIC_DATA']);
+  client.destroy();
+  await proxy.close();
+  await echo.close();
+});

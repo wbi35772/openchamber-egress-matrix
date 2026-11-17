@@ -105,6 +105,56 @@ function createRouterEngine(options = {}) {
   let flushTimer = null;
   let running = false;
   let lastUpdatedAt = '';
+  const observers = new Set();
+  const lastSignatures = new Map();
+
+  /*
+   * Slot observers receive every contract-visible state transition. The
+   * service wires them into the WebSocket hub (SLOT_STATE_UPDATED) and the
+   * panel merges them into its live matrix view.
+   */
+  function observe(fn) {
+    if (typeof fn !== 'function') return () => {};
+    observers.add(fn);
+    return () => observers.delete(fn);
+  }
+
+  function emitSlotUpdate(slot) {
+    for (const observer of observers) {
+      try {
+        observer({ type: 'SLOT_STATE_UPDATED', slot });
+      } catch (error) {
+        log(`槽位观察者失败: ${error.message}`);
+      }
+    }
+  }
+
+  function rememberRuntime(records) {
+    store.rememberSlots(records);
+    const seen = new Set();
+    for (const record of records) {
+      seen.add(record.matrixSlotId);
+      const signature = JSON.stringify([
+        record.healthState,
+        record.routingPlane,
+        record.leaseId,
+        record.egressPort,
+        record.egressFingerprint && record.egressFingerprint.exitIp,
+        record.egressFingerprint && record.egressFingerprint.ipv6Prefix64,
+        record.lastError,
+        record.cooldownUntil,
+      ]);
+      if (lastSignatures.get(record.matrixSlotId) === signature) continue;
+      lastSignatures.set(record.matrixSlotId, signature);
+      emitSlotUpdate(record);
+    }
+    for (const matrixSlotId of [...lastSignatures.keys()]) {
+      if (seen.has(matrixSlotId)) continue;
+      lastSignatures.delete(matrixSlotId);
+      store.forgetSlot(matrixSlotId);
+      emitSlotUpdate({ matrixSlotId, removed: true, healthState: 'REMOVED', egressPort: 0 });
+    }
+  }
 
   function enqueue(task) {
     const next = queue.then(task, task);
@@ -226,6 +276,10 @@ function createRouterEngine(options = {}) {
     const byKey = {};
     for (const lane of lanes) byKey[lane.key] = lane;
     const defaultInfo = byKey[DEFAULT_LANE] || null;
+    const slots = [...runtime.values()].map(recordOf).sort((left, right) => {
+      return contract.indexForSlotId(left.matrixSlotId) - contract.indexForSlotId(right.matrixSlotId);
+    });
+    rememberRuntime(slots);
     const payload = {
       version: 2,
       updatedAt: new Date().toISOString(),
@@ -234,9 +288,7 @@ function createRouterEngine(options = {}) {
       default: defaultInfo,
       byKey,
       lanes,
-      slots: [...runtime.values()].map(recordOf).sort((left, right) => {
-        return contract.indexForSlotId(left.matrixSlotId) - contract.indexForSlotId(right.matrixSlotId);
-      }),
+      slots,
     };
     try {
       writeEndpoints(payload);
@@ -330,23 +382,25 @@ function createRouterEngine(options = {}) {
     }
 
     const state = load();
-    const verdict = guard.evaluate(slot.matrixSlotId, target, { now });
-    if (!verdict.allow) {
-      if (verdict.quarantine) {
-        await quarantineSlot(slot.matrixSlotId, verdict.reason || verdict.code);
+    if (!meta.guardChecked) {
+      const verdict = guard.evaluate(slot.matrixSlotId, target, { now });
+      if (!verdict.allow) {
+        if (verdict.quarantine) {
+          await quarantineSlot(slot.matrixSlotId, verdict.reason || verdict.code);
+        }
+        throw Object.assign(new Error(verdict.reason || verdict.code), {
+          code: verdict.code,
+          matrixSlotId: slot.matrixSlotId,
+          lockUntil: verdict.lockUntil || 0,
+        });
       }
-      throw Object.assign(new Error(verdict.reason || verdict.code), {
-        code: verdict.code,
-        matrixSlotId: slot.matrixSlotId,
-        lockUntil: verdict.lockUntil || 0,
-      });
     }
 
-    const forced = meta.routingPlane && String(meta.routingPlane).toUpperCase() === 'STRICT_CONTROL';
-    const plane = forced || slot.routingPlane === 'STRICT_CONTROL'
+    const forced = contract.normalizeRoutingPlane(meta.routingPlane, '');
+    const plane = forced || (slot.routingPlane === 'STRICT_CONTROL'
       || contract.isControlPlaneHost(target.host, controlDomains(state))
       ? 'STRICT_CONTROL'
-      : 'ELASTIC_DATA';
+      : 'ELASTIC_DATA');
 
     if (plane === 'STRICT_CONTROL') {
       try {
@@ -413,6 +467,8 @@ function createRouterEngine(options = {}) {
           host: '127.0.0.1',
           port: slot.egressPort,
           upstreamFor: (target, meta) => connectFor(slot, target, meta),
+          guard: (target) => guard.evaluate(slot.matrixSlotId, target, { now: Date.now() }),
+          controlDomains: controlDomains(load()),
           log: (message) => log(`[${slot.matrixSlotId}] ${message}`),
         });
         const lane = { key: slot.key, slot, proxy, port: slot.egressPort };
@@ -461,6 +517,8 @@ function createRouterEngine(options = {}) {
         host: '127.0.0.1',
         port,
         upstreamFor: (target, meta) => connectFor(primary, target, meta),
+        guard: (target) => guard.evaluate(primary.matrixSlotId, target, { now: Date.now() }),
+        controlDomains: controlDomains(state),
         log: (message) => log(`[default] ${message}`),
       });
       defaultLane = { key: DEFAULT_LANE, matrixSlotId: primary.matrixSlotId, port, proxy };
@@ -627,7 +685,7 @@ function createRouterEngine(options = {}) {
     return { slots: runtime.size, listeners: listeners.size };
   }
 
-  async function claimFingerprint(slot, egress) {
+  async function claimFingerprint(slot, egress, options = {}) {
     const nextIp = String(egress.exitIp || '');
     const prefix = contract.normalizePrefix64(egress.ipv6Prefix64 || egress.ipv6 || '');
     const asn = String(egress.asn || '');
@@ -636,12 +694,14 @@ function createRouterEngine(options = {}) {
     if (changed && (nextIp || prefix)) {
       slot.epoch += 1;
       slot.leaseId = identityLeaseId(slot.intentId, slot.epoch);
-      await ledger.claim({
-        prefix64: prefix,
-        exitIp: nextIp,
-        matrixSlotId: slot.matrixSlotId,
-        leaseId: slot.leaseId,
-      });
+      if (!options.claimed) {
+        await ledger.claim({
+          prefix64: prefix,
+          exitIp: nextIp,
+          matrixSlotId: slot.matrixSlotId,
+          leaseId: slot.leaseId,
+        });
+      }
     }
     slot.egressFingerprint = contract.normalizeFingerprint({
       exitIp: nextIp,
@@ -669,14 +729,29 @@ function createRouterEngine(options = {}) {
         || (exitIp && exitIp !== slot.egressFingerprint.exitIp);
       let identity = null;
       if (needDeep) {
-        identity = await probeIdentity({ port: slot.egressPort, timeoutMs: 20000 });
+        try {
+          identity = await probeIdentity({
+            port: slot.egressPort,
+            timeoutMs: 20000,
+            leaseId: slot.leaseId,
+            claim: { matrixSlotId: slot.matrixSlotId, leaseId: slot.leaseId },
+          });
+        } catch (error) {
+          if (error && error.code === 'subnet_tainted') {
+            slot.healthState = 'QUARANTINED';
+            slot.lastError = error.message;
+            await closeLane(slot);
+            updateConfigLease(slot, { ok: false, healthState: 'QUARANTINED', checkError: error.message });
+          }
+          throw error;
+        }
       }
       try {
         await claimFingerprint(slot, {
           exitIp: (identity && identity.exitIp) || exitIp,
           ipv6Prefix64: identity && identity.ipv6,
           asn: identity && identity.asn,
-        });
+        }, { claimed: Boolean(identity && identity.claim) });
       } catch (error) {
         slot.healthState = 'QUARANTINED';
         slot.lastError = error.message;
@@ -886,6 +961,18 @@ function createRouterEngine(options = {}) {
         deep: options.deep !== false,
         ipv6: options.ipv6 === true,
       });
+      const exitIp = String((result && result.exitIp) || '');
+      if (exitIp) {
+        const snapshot = await ledger.snapshot().catch(() => null);
+        const owner = snapshot && snapshot.exitIps ? snapshot.exitIps[exitIp] : null;
+        const ownerSlot = String((owner && owner.matrixSlotId) || '');
+        if (ownerSlot && ownerSlot !== String(options.matrixSlotId || '')) {
+          throw Object.assign(
+            new Error(`节点出口 ${exitIp} 已归属槽位 ${ownerSlot}，跨槽复用被污点账本禁止`),
+            { status: 409, code: 'subnet_tainted', exitIp, matrixSlotId: ownerSlot },
+          );
+        }
+      }
       const lastCheck = {
         ok: true,
         exitIp: result.exitIp,
@@ -923,13 +1010,15 @@ function createRouterEngine(options = {}) {
 
   function status() {
     const state = load();
+    const slots = [...runtime.values()].map(snapshotSlot).sort((left, right) => {
+      return contract.indexForSlotId(left.matrixSlotId) - contract.indexForSlotId(right.matrixSlotId);
+    });
+    store.rememberSlots(slots);
     return {
       running,
       primary: state.settings.primary || '',
       defaultPort: Number(state.settings.defaultPort) || 0,
-      slots: [...runtime.values()].map(snapshotSlot).sort((left, right) => {
-        return contract.indexForSlotId(left.matrixSlotId) - contract.indexForSlotId(right.matrixSlotId);
-      }),
+      slots,
       lanes: lanesNow(),
       nodes: (state.nodes || []).length,
       warp: warp.status(),
@@ -1013,6 +1102,7 @@ function createRouterEngine(options = {}) {
     failSlot,
     releaseSlot,
     quarantineSlot,
+    observe,
     guard,
     warp,
     DEFAULT_LANE,
