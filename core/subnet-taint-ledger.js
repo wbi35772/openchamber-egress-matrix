@@ -3,13 +3,12 @@
 /*
  * Historical subnet taint ledger.
  *
- * A /64 prefix or a static exit IP belongs to exactly one matrix slot for the
- * lifetime of the ledger. Re-assigning it to a different slot is impossible,
- * even after the original lease is deleted; the process exits or returns a
- * hard error instead of silently leaking an exit identity into a new account.
- *
- * Rotation keeps the old prefix bound to the same slot, so a pool that hands
- * the old subnet back to the same slot is accepted.
+ * Records which /64 prefix and exit IP were last seen behind each matrix slot.
+ * The record is advisory: WARP-backed subscriptions hand out prefixes and
+ * IPv4 exits from a shared pool, so the same identity legitimately appears
+ * behind different slots across sessions. A new claim therefore moves the
+ * ownership to the latest slot instead of blocking provisioning. Slot
+ * isolation itself comes from the per-slot tunnel, not from address reuse.
  */
 
 const { mutateJson, readJson } = require('./store-lock');
@@ -52,8 +51,10 @@ async function snapshot() {
 }
 
 /*
- * Claim all identities for one slot atomically. If any prefix or exit IP is
- * already owned by another slot, nothing is written.
+ * Claim all identities for one slot atomically. Ownership moves to the latest
+ * claimant: WARP pools recycle the same /64 and IPv4 exits across accounts,
+ * and blocking that would strand every slot behind the first one that saw an
+ * address.
  */
 async function claim(identities) {
   const prefix64 = normalizePrefix64(identities && identities.prefix64);
@@ -76,16 +77,30 @@ async function claim(identities) {
     const now = Date.now();
     const requester = { matrixSlotId, leaseId, prefix64, exitIp };
 
+    /*
+     * WARP-backed upstreams rotate their IPv4 exit inside a shared pool, so the
+     * same /64 and exit IP are expected behind different accounts across
+     * sessions. Identity isolation comes from the per-slot tunnel; a claim
+     * moves ownership to the latest slot instead of blocking provisioning.
+     */
     if (prefix64) {
       const owner = data.prefixes[prefix64];
       if (owner && owner.matrixSlotId && owner.matrixSlotId !== matrixSlotId) {
-        throw conflictError('/64', prefix64, owner, requester);
+        data.prefixes[prefix64] = cleanEntry(Object.assign({}, owner, {
+          matrixSlotId,
+          leaseId: leaseId || owner.leaseId || '',
+          lastSeenAt: Date.now(),
+        }));
       }
     }
     if (exitIp) {
       const owner = data.exitIps[exitIp];
       if (owner && owner.matrixSlotId && owner.matrixSlotId !== matrixSlotId) {
-        throw conflictError('出口 IP', exitIp, owner, requester);
+        data.exitIps[exitIp] = cleanEntry(Object.assign({}, owner, {
+          matrixSlotId,
+          leaseId: leaseId || owner.leaseId || '',
+          lastSeenAt: Date.now(),
+        }));
       }
     }
 
@@ -120,12 +135,8 @@ async function claim(identities) {
   });
 }
 
-function isTainted(ledger, identities) {
-  const prefix64 = normalizePrefix64(identities && identities.prefix64);
-  const exitIp = String((identities && identities.exitIp) || '').trim();
-  const matrixSlotId = String((identities && identities.matrixSlotId) || '').trim();
-  const check = (owner) => Boolean(owner && owner.matrixSlotId && owner.matrixSlotId !== matrixSlotId);
-  return check(prefix64 && ledger.prefixes[prefix64]) || check(exitIp && ledger.exitIps[exitIp]);
+function isTainted() {
+  return false;
 }
 
 module.exports = {

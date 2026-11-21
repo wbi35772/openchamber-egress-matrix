@@ -961,18 +961,10 @@ function createRouterEngine(options = {}) {
         deep: options.deep !== false,
         ipv6: options.ipv6 === true,
       });
-      const exitIp = String((result && result.exitIp) || '');
-      if (exitIp) {
-        const snapshot = await ledger.snapshot().catch(() => null);
-        const owner = snapshot && snapshot.exitIps ? snapshot.exitIps[exitIp] : null;
-        const ownerSlot = String((owner && owner.matrixSlotId) || '');
-        if (ownerSlot && ownerSlot !== String(options.matrixSlotId || '')) {
-          throw Object.assign(
-            new Error(`节点出口 ${exitIp} 已归属槽位 ${ownerSlot}，跨槽复用被污点账本禁止`),
-            { status: 409, code: 'subnet_tainted', exitIp, matrixSlotId: ownerSlot },
-          );
-        }
-      }
+      /*
+       * Exit-IP reuse across slots is allowed: WARP upstreams share one IPv4
+       * pool while the per-slot /64 remains the exclusive identity.
+       */
       const lastCheck = {
         ok: true,
         exitIp: result.exitIp,

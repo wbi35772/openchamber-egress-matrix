@@ -275,7 +275,7 @@ describe('matrix-store', () => {
 });
 
 describe('subnet-taint-ledger', () => {
-  it('binds /64 and exit IP to one slot forever', async () => {
+  it('moves /64 and exit-IP ownership to the latest slot', async () => {
     fs.rmSync(matrixStore.LEDGER_FILE, { force: true });
     const first = await ledger.claim({
       prefix64: '2001:db8:100::/64',
@@ -289,21 +289,15 @@ describe('subnet-taint-ledger', () => {
     const snapshot = await ledger.snapshot();
     assert.equal(snapshot.prefixes['2001:db8:100:0::/64'].matrixSlotId, 'slot-010');
 
-    await assert.rejects(
-      ledger.claim({ prefix64: '2001:db8:100::/64', matrixSlotId: 'slot-011', leaseId: 'l2' }),
-      (error) => error.code === 'subnet_tainted' && error.status === 409,
-    );
-    await assert.rejects(
-      ledger.claim({ exitIp: '203.0.113.10', matrixSlotId: 'slot-011', leaseId: 'l2' }),
-      (error) => error.code === 'subnet_tainted',
-    );
+    await ledger.claim({ prefix64: '2001:db8:100::/64', matrixSlotId: 'slot-011', leaseId: 'l2' });
+    await ledger.claim({ exitIp: '203.0.113.10', matrixSlotId: 'slot-011', leaseId: 'l2' });
 
-    const stillOwned = await ledger.snapshot();
-    assert.equal(stillOwned.prefixes['2001:db8:100:0::/64'].matrixSlotId, 'slot-010');
-    assert.equal(stillOwned.exitIps['203.0.113.10'].matrixSlotId, 'slot-010');
+    const moved = await ledger.snapshot();
+    assert.equal(moved.prefixes['2001:db8:100:0::/64'].matrixSlotId, 'slot-011');
+    assert.equal(moved.exitIps['203.0.113.10'].matrixSlotId, 'slot-011');
   });
 
-  it('allows the owning slot to reclaim and reports taint', async () => {
+  it('allows a previous owner to reclaim and never reports taint', async () => {
     const before = await ledger.snapshot();
     const again = await ledger.claim({
       prefix64: '2001:db8:100::/64',
@@ -316,7 +310,7 @@ describe('subnet-taint-ledger', () => {
     assert.equal(entry.leaseId, 'l3');
 
     const main = await ledger.snapshot();
-    assert.equal(ledger.isTainted(main, { prefix64: '2001:db8:100::/64', matrixSlotId: 'slot-012' }), true);
+    assert.equal(ledger.isTainted(main, { prefix64: '2001:db8:100::/64', matrixSlotId: 'slot-012' }), false);
     assert.equal(ledger.isTainted(main, { prefix64: '2001:db8:100::/64', matrixSlotId: 'slot-010' }), false);
   });
 
@@ -636,7 +630,7 @@ describe('lease batch planning', () => {
     assert.deepEqual(plan.specs.map((spec) => spec.country), ['TH', 'TH', 'TH']);
   });
 
-  it('skips nodes whose exit IP is tainted by another matrix slot', () => {
+  it('keeps nodes whose exit IP appeared behind another matrix slot', () => {
     const state = {
       leases: [],
       nodes: [
@@ -655,17 +649,9 @@ describe('lease batch planning', () => {
       ledgerSnapshot: snapshot,
       matrixSlotId: 'slot-050',
     });
-    assert.equal(plan.specs.length, 1);
-    assert.equal(plan.specs[0].nodeId, 'n_clean');
-    assert.equal(plan.tainted, 1);
-
-    const owned = leaseBatch.planLeases(state, sub, {
-      onlyPassed: true,
-      ledgerSnapshot: snapshot,
-      matrixSlotId: 'slot-099',
-    });
-    assert.equal(owned.specs.length, 2);
-    assert.equal(owned.tainted, 0);
+    assert.equal(plan.specs.length, 2);
+    assert.deepEqual(plan.specs.map((spec) => spec.nodeId), ['n_tainted', 'n_clean']);
+    assert.equal(plan.tainted, 0);
   });
 });
 
